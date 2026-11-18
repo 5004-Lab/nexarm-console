@@ -13,9 +13,9 @@ from urllib.parse import unquote, urlsplit
 
 CONTROL_ACTIONS = frozenset({
     "arm", "disarm", "heartbeat", "read", "preview-target", "move-target",
-    "move-joints", "jog", "stop", "run",
+    "move-joints", "jog", "stop", "run", "park", "capture-start", "capture-export",
 })
-READ_APIS = frozenset({"/api/state", "/api/camera", "/api/logs"})
+READ_APIS = frozenset({"/api/state", "/api/camera", "/api/logs", "/api/capture-state", "/api/capture-file", "/api/capture-library"})
 MAX_BODY = 65536
 
 
@@ -79,7 +79,7 @@ def application(host, port, peer, upstream_port, password):
                 self.send_response(upstream.status)
                 for name, value in upstream.getheaders():
                     if name.lower() in {
-                        "content-type", "content-length", "cache-control", "last-modified",
+                        "content-type", "content-length", "cache-control", "last-modified", "content-disposition",
                         "x-camera-state", "x-camera-time", "x-pose-skew", "x-camera-pose",
                     }:
                         self.send_header(name, value)

@@ -34,6 +34,13 @@ class CameraFeed:
                     return "live", (stamp, jpeg) if stamp > after else None
             return "waiting", None
 
+    def nearest(self, stamp, after):
+        with self.lock:
+            if self.state != "live":
+                return None
+            return min((frame for frame in self.frames if frame[0] > after),
+                       key=lambda frame: abs(frame[0] - stamp), default=None)
+
     def update_state(self, state):
         with self.lock:
             self.state = state

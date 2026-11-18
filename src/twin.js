@@ -4,6 +4,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import URDFLoader from 'urdf-loader';
 import joints from './joints.json';
 import workcell from './workcell.json';
+import sampledReach from './reach.json';
 
 export function createTwin(host, onLoad) {
   let renderer;
@@ -32,7 +33,7 @@ export function createTwin(host, onLoad) {
   const views = {
     iso: [0.64, 0.52, 0.67],
     front: [0.001, 0.25, 0.98],
-    top: [0.002, 1.00, 0.001],
+    top: [0, 1.85, 0.001],
   };
   function view(name) {
     camera.position.set(...views[name]);
@@ -107,11 +108,14 @@ export function createTwin(host, onLoad) {
   trajectory.visible = false;
   scene.add(trajectory);
 
-  const pickGrid = new THREE.GridHelper(0.85, 17, 0x0072bd, 0x8aacc6);
-  pickGrid.material.transparent = true;
-  pickGrid.material.opacity = 0.5;
-  pickGrid.visible = false;
-  scene.add(pickGrid);
+  const slice = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({
+    color: 0x0072bd, size: 4, sizeAttenuation: false, opacity: 0.65, transparent: true, depthTest: false,
+  }));
+  slice.visible = false;
+  scene.add(slice);
+  const coordinates = ([x, y, z]) => new THREE.Vector3(x / 1000, z / 1000, -y / 1000);
+  let sliceSamples = [];
+  let pickHeight = 0;
   const picker = new THREE.Raycaster();
   let pickCallback;
   let pointerDown;
@@ -124,10 +128,13 @@ export function createTwin(host, onLoad) {
     picker.setFromCamera(new THREE.Vector2(
       (event.clientX - rect.left) * 2 / rect.width - 1, 1 - (event.clientY - rect.top) * 2 / rect.height,
     ), camera);
-    const point = picker.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -pickGrid.position.y), new THREE.Vector3());
-    if (point) pickCallback([point.x * 1000, -point.z * 1000, point.y * 1000]);
+    const point = picker.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -pickHeight / 1000), new THREE.Vector3());
+    if (!point) return;
+    const xy = [Math.round(point.x * 10000) / 10, -Math.round(point.z * 10000) / 10, pickHeight];
+    const nearby = sliceSamples.map(candidate => [Math.hypot(xy[0] - candidate[0], xy[1] - candidate[1]), candidate])
+      .filter(([distance]) => distance <= 55).sort((a, b) => a[0] - b[0]).slice(0, 3);
+    pickCallback(nearby.length ? [xy, ...nearby.map(item => item[1])] : []);
   });
-  const coordinates = ([x, y, z]) => new THREE.Vector3(x / 1000, z / 1000, -y / 1000);
   for (const obstacle of workcell.obstacles) {
     const lower = coordinates(obstacle.min_mm);
     const upper = coordinates(obstacle.max_mm);
@@ -222,9 +229,21 @@ export function createTwin(host, onLoad) {
     pick(height, callback) {
       const enabled = height !== null;
       pickCallback = enabled ? callback : null;
-      pickGrid.visible = enabled;
-      if (enabled) pickGrid.position.y = height / 1000;
+      controls.enableRotate = !enabled;
+      slice.visible = enabled;
+      if (enabled) {
+        pickHeight = height;
+        sliceSamples = sampledReach.filter(([x, y, z]) =>
+          Math.abs(z - height) <= 18 && Math.hypot(x, y, height) <= workcell.max_reach_mm
+        ).map(([x, y]) => [x, y, height]);
+        slice.geometry.dispose();
+        slice.geometry = new THREE.BufferGeometry().setFromPoints(sliceSamples.map(coordinates));
+        controls.target.y = height / 1000;
+        camera.position.set(0, height / 1000 + 1.82, 0.001);
+        controls.update();
+      }
       renderer.domElement.style.cursor = enabled ? 'crosshair' : '';
+      return sliceSamples.length;
     },
     target(point) {
       targetDot.visible = point !== null;

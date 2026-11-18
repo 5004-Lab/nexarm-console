@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import secrets
+import shutil
 import struct
 import threading
 import time
@@ -19,6 +20,7 @@ import serial
 
 from . import kinematics
 from .camera_feed import CameraFeed
+from .recording import Recorder
 
 ROOT = Path(__file__).resolve().parents[1]
 JOINTS = kinematics.JOINTS
@@ -99,6 +101,9 @@ class Controller:
         self.last_feedback = 0
         self.frame_times = deque(maxlen=20)
         self.history = deque(maxlen=30)
+        self.commands = deque(maxlen=160)
+        self.capture_completed = None
+        self.velocity = self.acceleration = None
         self.board_stop_pending = False
         self.read_pending = False
         self.voltage = None
@@ -171,6 +176,10 @@ class Controller:
                 "power_ok": self.power_ok(now),
                 "feedback": self.feedback,
                 "angles": [kinematics.angle(i, p) for i, p in enumerate(self.positions())] if self.feedback else None,
+                "velocity": self.velocity if self.feedback_ok(now) else None,
+                "acceleration": self.acceleration if self.feedback_ok(now) else None,
+                "action_angles": [kinematics.angle(i, p) for i, p in enumerate(self.commands[-1][1])]
+                    if self.commands and self.feedback_ok(now) else None,
                 "tcp": kinematics.tcp(self.positions()) if self.feedback else None,
                 "revision": self.last_feedback,
                 "hz": sum(now - t < 1 for t in self.frame_times),
@@ -242,25 +251,22 @@ class Controller:
         }
 
     def set_phases(self, motion, start, phases):
-        previous = start
-        steps = 0
-        for phase in phases:
-            goal = phase["positions"]
-            steps += math.ceil(max(abs(a - b) for a, b in zip(previous, goal)) / 80)
-            previous = goal
-        motion.update(phases=phases, phase_index=0, target=phases[0]["positions"], steps_left=2 * steps + 2 * len(phases) + 4)
-        motion.pop("segment_tolerance", None)
+        motion.update(phases=phases, phase_index=0)
+        self.set_motion_leg(motion, start, phases[0]["positions"])
 
-    def begin_motion(self, target, duration, label, xyz=None, phases=None, held_axes=None):
+    def set_motion_leg(self, motion, start, target):
+        motion.update(target=target, origin=start, cursor=0.0, command=None,
+                      sent_at=None, phase_started=None, sampled_feedback=None)
+
+    def begin_motion(self, target, duration, label, xyz=None, phases=None):
         start = self.positions()
         bounds = kinematics.joint_limits(start)
         stages = phases or [{"name": label, "positions": target}]
         kinematics.check_path(start, stages[0]["positions"], bounds)
         self.motion = {
-            "duration": duration, "label": label, "segment": None,
-            "bounds": bounds, "started": False, "torque_ready_at": None,
-            "xyz": xyz, "corrections": 0, "retries": 0, "replan": None, "replanned": False,
-            "held_axes": held_axes or {},
+            "label": label, "bounds": bounds, "torque_ready_at": None,
+            "xyz": xyz, "replan": None, "replans": 0,
+            "preferred_speed": max(abs(a - b) for a, b in zip(start, target)) * 1000 / duration if duration else None,
         }
         self.set_phases(self.motion, start, stages)
         if xyz is not None:
@@ -271,6 +277,12 @@ class Controller:
             start, candidate = self.plan_target(data)
             if action == "preview-target":
                 return candidate
+        if action == "park":
+            with self.lock:
+                if self.owner != client or not self.feedback_ok(time.monotonic()):
+                    raise ValueError("请先启用控制并等待读取当前位置")
+                park_start = self.positions()
+            park = kinematics.plan_park(park_start, kinematics.joint_limits(park_start))
         if action in ("download", "board-run"):
             with self.lock:
                 if self.owner != client or not self.feedback_ok(time.monotonic()):
@@ -328,9 +340,15 @@ class Controller:
             if action == "move-target":
                 if max(abs(a - b) for a, b in zip(start, self.positions())) > 16:
                     raise ValueError("当前姿态已变化，请重新检查目标")
-                self.begin_motion(candidate["positions"], 0, "坐标运动", data["xyz"], candidate["phases"], candidate["held_axes"])
+                self.begin_motion(candidate["positions"], 0, "坐标运动", data["xyz"], candidate["phases"])
                 self.message("坐标路径检查通过，开始运动")
                 return candidate
+            if action == "park":
+                if max(abs(a - b) for a, b in zip(park_start, self.positions())) > 8:
+                    raise ValueError("当前姿态已变化，请重新复位")
+                self.begin_motion(park["positions"], 0, "复位", phases=park["phases"])
+                self.message("复位路径检查通过")
+                return park
             if action == "jog":
                 device = integer(data.get("device"), 1, 6, "舵机 ID")
                 requested = kinematics.position_for_angle(device - 1, data.get("angle"))
@@ -411,6 +429,8 @@ class Controller:
                 "mode": action, "frames": validated, "index": 0, "loop": 1, "loops": loops,
                 "next_at": now, "group": group if action == "download" else None,
                 "previous": [p[0] for p in self.feedback],
+                "capture": data.get("capture_id") if action == "run" else None,
+                "capture_ready": False,
             }
             if action == "download":
                 self.group_times.pop(group, None)
@@ -427,6 +447,10 @@ class Controller:
 
     def transmit(self, link, frame):
         link.write(frame)
+        if frame[4] == BRIDGE_WRITE and len(frame) == 18:
+            task = self.task or {}
+            recording = task.get("capture") if task.get("capture_ready") else None
+            self.commands.append((time.monotonic(), struct.unpack("<6h", frame[5:-1]), recording, task.get("loop")))
         self.log("hex", f"[TX] {frame.hex(' ').upper()}")
 
     def update_feedback(self, joints, now):
@@ -434,6 +458,22 @@ class Controller:
             return False
         if not self.feedback_ok(now):
             self.log("text", "收到 NexArm 六轴实际位置")
+        dt = now - self.last_feedback
+        if self.feedback is not None and 0.025 <= dt <= 0.40:
+            speed = [math.degrees((p - old) * kinematics.SCALE[i]) / dt
+                     for i, ((p, _), (old, _)) in enumerate(zip(joints, self.feedback))]
+            previous = self.velocity
+            weight = 1 - math.exp(-dt / 0.15)
+            self.velocity = speed if previous is None else [
+                old + weight * (value - old) for value, old in zip(speed, previous)
+            ]
+            if previous is not None:
+                acceleration = [(value - old) / dt for value, old in zip(self.velocity, previous)]
+                self.acceleration = acceleration if self.acceleration is None else [
+                    old + weight * (value - old) for value, old in zip(acceleration, self.acceleration)
+                ]
+        elif dt > 0.40:
+            self.velocity = self.acceleration = None
         self.feedback = joints
         self.last_feedback = now
         self.frame_times.append(now)
@@ -474,6 +514,16 @@ class Controller:
         elif command != 11:
             self.log("text", f"[CB] id=0x{device:02X} cmd={command} len={len(payload)}")
 
+    def request_replan(self, link, motion, actual, now, axis, reason):
+        if motion["xyz"] is None or motion["replans"] >= 2:
+            self.stop(now, True, reason + "，已停止")
+            return
+        if self.bridge_ready and self.moving:
+            self.transmit(link, bridge_move(actual))
+        motion["replans"] += 1
+        motion["replan"] = {"axis": axis, "settle": now + 0.22, "deadline": now + 7}
+        self.log("text", reason + "，从实测姿态搜索备用路径")
+
     def tick_replan(self, motion, actual, now):
         replan = motion["replan"]
         if now >= replan["deadline"]:
@@ -484,11 +534,17 @@ class Controller:
         if "start" not in replan:
             replan["start"] = actual
             axis = replan["axis"]
-            bounds = kinematics.lock_axes(motion["bounds"], {**motion["held_axes"], axis: actual[axis]})
+            bounds = kinematics.joint_limits(actual)
 
             def compute():
                 try:
-                    solution = kinematics.plan_cartesian(actual, motion["xyz"], bounds)
+                    constrained = kinematics.lock_axes(bounds, {axis: actual[axis]}) if axis is not None else bounds
+                    try:
+                        solution = kinematics.plan_cartesian(actual, motion["xyz"], constrained)
+                    except ValueError:
+                        if axis is None or motion["replans"] > 1:
+                            raise
+                        solution = kinematics.plan_cartesian(actual, motion["xyz"], bounds)
                     answer = (solution, None)
                 except ValueError as exc:
                     answer = (None, str(exc))
@@ -500,111 +556,53 @@ class Controller:
         if "answer" not in replan:
             return
         solution, error = replan["answer"]
-        axis = replan["axis"]
-        if error is not None or max(abs(a - b) for a, b in zip(actual, replan["start"])) > 10:
-            reason = error or "实测姿态仍在变化"
-            self.stop(now, True, f"J{axis + 1} 跟踪异常，无法安全绕行（{reason}），已停止")
+        if error or max(abs(a - b) for a, b in zip(actual, replan["start"])) > 10:
+            self.stop(now, True, f"备用路径未通过（{error or '起始姿态仍在变化'}），已停止")
             return
         phases = solution["phases"] or [{"name": "末端复核", "positions": solution["positions"]}]
-        motion["held_axes"] = solution["held_axes"]
+        motion["bounds"] = kinematics.joint_limits(actual)
         self.set_phases(motion, actual, phases)
         motion["replan"] = None
-        self.log("text", f"J{axis + 1} 保持在实测位置，从第 1/{len(phases)} 段继续")
+        self.log("text", f"新的六轴路径已校验，共 {len(phases)} 段")
 
     def tick_motion(self, link, now):
         motion = self.motion
-        if motion is None:
-            return
         actual = self.positions()
         if motion["replan"]:
             self.tick_replan(motion, actual, now)
             return
-        xyz = motion["xyz"]
-        segment = motion["segment"]
-        if segment is not None:
-            if self.last_feedback < motion["until"]:
-                return
-            deviations = [abs(a - b) for a, b in zip(actual, segment)]
-            largest = max(deviations)
-            original_errors = [abs(goal - start) for start, goal in zip(motion["segment_start"], segment)]
-            progress = all(
-                before <= 18 or after <= 5 or before - after >= max(4, before * 0.18)
-                for before, after in zip(original_errors, deviations)
-            )
-            transit = xyz is not None and segment != motion["target"]
-            tolerance = motion["segment_tolerance"]
-            if largest > tolerance and not (transit and largest <= 28 and progress):
-                for i, error in enumerate(deviations):
-                    if error <= motion["best_errors"][i] - 3:
-                        motion["best_errors"][i] = error
-                        motion["last_progress"][i] = now
-                lagging = deviations.index(largest)
-                if now <= min(motion["until"] + 2.6, motion["last_progress"][lagging] + 1.05):
-                    return
-                if xyz is not None and progress and motion["retries"] < 2 and max(
-                    before - after for before, after in zip(original_errors, deviations)
-                ) >= 5:
-                    motion["retries"] += 1
-                    self.log("text", "按最新实测关节位置重新校验剩余路径")
-                elif xyz is not None and not motion["replanned"] and 1 <= lagging <= 4 and largest <= 36 and any(
-                    before - after >= 8 for i, (before, after) in enumerate(zip(original_errors, deviations)) if i != lagging
-                ):
-                    # Hold before planning. The lagging joint stays at its measured position.
-                    self.transmit(link, bridge_move(actual))
-                    motion["segment"] = None
-                    motion["replanned"] = True
-                    motion["replan"] = {"axis": lagging, "settle": now + 0.25, "deadline": now + 5.0}
-                    self.log("text", f"J{lagging + 1} 跟踪滞后，保持当前位置并检查备用路径")
-                    return
-                else:
-                    i = deviations.index(largest)
-                    measured, expected = (kinematics.angle(i, p) for p in (actual[i], segment[i]))
-                    self.stop(now, True, f"J{i + 1} 未到位（实测 {measured:.1f}°，目标 {expected:.1f}°），已停止")
-                    return
-            motion["segment"] = None
-        delta = [b - a for a, b in zip(actual, motion["target"])]
-        distance = max(map(abs, delta))
-        tolerance = motion.get("segment_tolerance", 3)
+        if motion["sampled_feedback"] == self.last_feedback:
+            return
+        xyz, goal = motion["xyz"], motion["target"]
         next_index = motion["phase_index"] + 1
-        final_phase = next_index == len(motion["phases"])
-        error = math.dist(kinematics.tcp(actual), xyz) if xyz is not None and final_phase and distance <= tolerance else None
-        if distance <= tolerance and (error is None or error <= 3.0 or distance <= 3):
-            if next_index < len(motion["phases"]):
-                phase = motion["phases"][next_index]
-                motion["phase_index"] = next_index
-                goal = phase["positions"]
-                if phase["name"] == "底座转向":
-                    goal = [goal[0], *actual[1:]]
-                motion["target"] = goal
-                motion.pop("segment_tolerance", None)
-                self.log("text", f"第 {next_index + 1}/{len(motion['phases'])} 段：{phase['name']}")
-                return
-            title = motion["label"]
-            if error is None or error <= 3.0:
-                self.motion = None
-                self.in_flight_until = now
-                self.moving.clear()
-                self.message(f"{title}完成，末端误差 {error:.1f} mm" if error is not None else f"{title}完成，已收到实机反馈")
-                return
-            if motion["corrections"] >= 2:
-                self.stop(now, True, f"末端误差 {error:.1f} mm，已停止")
-                return
+        final = next_index == len(motion["phases"])
+        remaining = [abs(a - b) for a, b in zip(actual, goal)]
+        largest = max(remaining)
+        settled = not self.velocity or max(map(abs, self.velocity)) <= 3.0
+        tcp_error = math.dist(kinematics.tcp(actual), xyz) if xyz is not None and final else None
+        reached = largest <= 5 if tcp_error is None else tcp_error <= 3.0 and largest <= 12
+        if final and reached and (motion["command"] is None or (motion["command"] == goal and settled)):
+            if motion["command"] is not None and largest > 5:
+                self.transmit(link, bridge_move(actual))
+            self.motion = None
+            self.in_flight_until = now
+            self.moving.clear()
+            self.message(f"{motion['label']}完成，末端误差 {tcp_error:.1f} mm" if tcp_error is not None
+                         else f"{motion['label']}完成，已收到实机反馈")
+            return
+        if not final and (largest <= 5 or (motion["command"] == goal and largest <= 32)):
+            phase = motion["phases"][next_index]
+            next_goal = phase["positions"]
+            if phase["name"] == "底座转向":
+                next_goal = [next_goal[0], *actual[1:]]
             try:
-                bounds = kinematics.lock_axes(motion["bounds"], motion["held_axes"])
-                solution = kinematics.plan(actual, xyz, bounds)
+                kinematics.check_path(actual, next_goal, motion["bounds"])
             except ValueError as exc:
-                self.stop(now, True, f"{exc}，末端误差 {error:.1f} mm")
+                self.request_replan(link, motion, actual, now, None, f"按实测姿态复查后续路径：{exc}")
                 return
-            motion["target"] = solution["positions"]
-            motion["corrections"] += 1
-            motion.pop("segment_tolerance", None)
-            delta = [b - a for a, b in zip(actual, motion["target"])]
-            distance = max(map(abs, delta))
-            if distance <= 3:
-                self.stop(now, True, f"末端误差 {error:.1f} mm，已停止")
-                return
-        if motion["steps_left"] <= 0:
-            self.stop(now, True, "无法在预定分段内到达目标，已停止")
+            motion["phase_index"] = next_index
+            self.set_motion_leg(motion, actual, next_goal)
+            self.log("text", f"第 {next_index + 1}/{len(motion['phases'])} 段：{phase['name']}")
             return
         if self.bridge_started is None:
             self.transmit(link, packet(BRIDGE_MODE, b"\x01"))
@@ -614,35 +612,71 @@ class Controller:
             return
         if not self.bridge_ready:
             return
-        fraction = min(1, (80 if xyz is not None else 95) / distance)
-        segment = [round(p + fraction * d) for p, d in zip(actual, delta)]
-        try:
-            kinematics.check_path(actual, segment, motion["bounds"])
-        except ValueError as exc:
-            self.stop(now, True, f"{exc}，已停止")
-            return
-        axes = [i + 1 for i, (a, b) in enumerate(zip(actual, segment)) if abs(a - b) > 4]
-        if motion["torque_ready_at"] is None or any(self.torque[i - 1] is not True for i in axes):
-            self.transmit(link, packet(BRIDGE_TORQUE, b"\x01"))
-            self.torque[:] = [True] * 6
-            motion["torque_ready_at"] = now + 0.04
-            return
+        if motion["torque_ready_at"] is None:
+            if any(value is not True for value in self.torque):
+                self.transmit(link, packet(BRIDGE_TORQUE, b"\x01"))
+                self.torque[:] = [True] * 6
+                motion["torque_ready_at"] = now + 0.05
+                return
+            motion["torque_ready_at"] = now
         if now < motion["torque_ready_at"]:
             return
-        desired = motion["duration"] * fraction if motion["duration"] else distance * fraction * (8 if xyz is not None else 6)
-        speed = max(75, min(210, round(distance * fraction * 1000 / max(350, desired))))
-        self.transmit(link, packet(BRIDGE_PARAMS, struct.pack("<BH", 75, speed)))
-        self.transmit(link, bridge_move(segment))
-        duration = max(0.38, distance * fraction / speed + 0.24)
-        motion["segment"] = segment
-        motion["segment_start"] = actual
-        motion["segment_tolerance"] = max(3, min(12, round(distance * fraction * 0.16)))
-        motion["best_errors"] = [abs(a - b) for a, b in zip(actual, segment)]
-        motion["last_progress"] = [now + duration for _ in segment]
-        motion["steps_left"] -= 1
-        motion["started"] = True
-        motion["until"] = self.in_flight_until = now + duration
-        self.moving.update(axes)
+
+        motion["sampled_feedback"] = self.last_feedback
+        start = motion["origin"]
+        deltas = [b - a for a, b in zip(start, goal)]
+        span = max(map(abs, deltas))
+        speed = max(75, min(210, round(motion["preferred_speed"] or (125 if xyz is not None else 165))))
+        if motion["phase_started"] is None:
+            motion.update(phase_started=now, best=remaining[:], progress_at=[now] * 6)
+        for i, error in enumerate(remaining):
+            if error <= motion["best"][i] - 3:
+                motion["best"][i] = error
+                motion["progress_at"][i] = now
+
+        old_command = motion["command"]
+        if old_command is not None:
+            outstanding = [abs(a - b) for a, b in zip(actual, old_command)]
+            stalled = [i for i, error in enumerate(outstanding)
+                       if error > (12 if final and old_command == goal else 23)
+                       and now - motion["progress_at"][i] > 1.45]
+            final_residual = old_command == goal and now - motion["sent_at"] > 1.45 and settled
+            timed_out = now - motion["phase_started"] > max(4.5, 3 + 2.8 * span / speed)
+            if stalled or final_residual or timed_out:
+                axis = max(stalled, key=outstanding.__getitem__) if stalled else remaining.index(largest)
+                observed, expected = (kinematics.angle(axis, pos) for pos in (actual[axis], goal[axis]))
+                description = f"J{axis + 1} 跟踪偏差（实测 {observed:.1f}°，目标 {expected:.1f}°）"
+                if tcp_error is not None:
+                    description += f"，末端误差 {tcp_error:.1f} mm"
+                self.request_replan(link, motion, actual, now, axis if largest > 9 else None, description)
+                return
+
+        # Advance a common trajectory cursor from fresh encoder samples. Each
+        # axis bounds how far the lookahead can get ahead of its actual position.
+        lead = 55
+        ceiling = min((travel + lead) / abs(delta)
+                      for a, origin, delta in zip(actual, start, deltas) if abs(delta) > lead
+                      for travel in [(a - origin) * (1 if delta > 0 else -1)]) if span > lead else 1
+        step = speed * min(0.16, now - motion["sent_at"]) if old_command is not None else lead
+        cursor = min(span, ceiling * span, motion["cursor"] + step)
+        if old_command is not None and cursor < motion["cursor"] + 2 and cursor < span:
+            return
+        goal_fraction = max(0, cursor) / span if span else 1
+        command = [round(origin + goal_fraction * delta) for origin, delta in zip(start, deltas)]
+        if command == old_command:
+            return
+        try:
+            kinematics.check_path(actual, command, motion["bounds"])
+        except ValueError as exc:
+            self.request_replan(link, motion, actual, now, None, f"实测路径校验失败：{exc}")
+            return
+        if motion.get("sent_speed") != speed:
+            self.transmit(link, packet(BRIDGE_PARAMS, struct.pack("<BH", 75, speed)))
+            motion["sent_speed"] = speed
+        self.transmit(link, bridge_move(command))
+        motion.update(command=command, cursor=cursor, sent_at=now)
+        self.in_flight_until = now + 0.25
+        self.moving.update(i + 1 for i, (a, b) in enumerate(zip(actual, command)) if a != b)
 
     def tick(self, link, now):
         if self.board_stop_pending:
@@ -675,7 +709,21 @@ class Controller:
         task = self.task
         if task is None or now < task["next_at"]:
             return
+        if task["capture"] and not task["capture_ready"]:
+            # Every recorded repetition starts at the same taught pose.
+            start = [servo["pos"] for servo in task["frames"][0]["servos"]]
+            if task["index"] == 0:
+                try:
+                    self.begin_motion(start, 0, f"采集第 {task['loop']} 回合 · 准备起点")
+                except ValueError as exc:
+                    self.stop(now, True, f"采集起点路径不可用（{exc}）")
+                    return
+                task["index"] = 1
+                return
+            task["capture_ready"] = True
         if task["index"] == len(task["frames"]):
+            if task["capture"]:
+                self.capture_completed = (task["capture"], task["loop"], now)
             if task["mode"] == "download":
                 self.group_times[task["group"]] = sum(f["time"] for f in task["frames"]) / 1000
                 self.group_frames[task["group"]] = task["frames"]
@@ -683,6 +731,7 @@ class Controller:
             elif task["loops"] == 0 or task["loop"] < task["loops"]:
                 task["loop"] += 1
                 task["index"] = 0
+                task["capture_ready"] = False
                 return
             else:
                 self.message("电脑在线运行结束")
@@ -720,6 +769,8 @@ class Controller:
                 self.torque[:] = [None] * 6
                 self.frame_times.clear()
                 self.history.clear()
+                self.commands.clear()
+                self.velocity = self.acceleration = None
                 self.read_pending = False
                 self.bridge_started = self.bridge_reference = None
                 self.bridge_ready = False
@@ -771,7 +822,7 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
     request_queue_size = 64
 
 
-def application(controller, origin, camera, view_password=None):
+def application(controller, origin, camera, view_password=None, recorder=None):
     key = secrets.token_urlsafe(32)
     viewing = view_password is not None
     authorization = "Basic " + base64.b64encode(f"nexarm:{view_password}".encode()).decode() if viewing else ""
@@ -841,7 +892,37 @@ def application(controller, origin, camera, view_password=None):
         def do_GET(self):
             if not self.allow_view():
                 return
-            if urlsplit(self.path).path == "/api/camera":
+            path = urlsplit(self.path).path
+            if path == "/api/capture-state" and recorder and not viewing:
+                self.response(recorder.snapshot())
+            elif path == "/api/capture-library" and recorder and not viewing:
+                self.response(recorder.library())
+            elif path == "/api/capture-file" and recorder and not viewing:
+                params = parse_qs(urlsplit(self.path).query)
+                identifier = params.get("id", [""])[0]
+                variant = params.get("format", [""])[0]
+                if (len(identifier) != 32 or any(letter not in "0123456789abcdef" for letter in identifier)
+                        or variant not in ("raw", "lerobot")):
+                    self.send_error(404)
+                    return
+                name = identifier + ("-lerobot" if variant == "lerobot" else "") + ".zip"
+                try:
+                    archive = (recorder.root / name).open("rb")
+                except FileNotFoundError:
+                    self.send_error(404)
+                    return
+                with archive:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Length", str(os.fstat(archive.fileno()).st_size))
+                    self.send_header("Content-Disposition", f'attachment; filename="nexarm-{name}"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    try:
+                        shutil.copyfileobj(archive, self.wfile, 256 * 1024)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+            elif path == "/api/camera":
                 self.camera_frame()
             elif self.path == "/api/state":
                 state = controller.snapshot(None if viewing else self.client())
@@ -881,8 +962,14 @@ def application(controller, origin, camera, view_password=None):
                 data = json.loads(self.rfile.read(size))
                 if not isinstance(data, dict):
                     raise ValueError("请求格式无效")
-                result = controller.act(action, client, data)
-            except (ValueError, UnicodeError) as exc:
+                if action == "capture-start" and recorder:
+                    result = recorder.start(client, data)
+                elif action == "capture-export" and recorder:
+                    recorder.export(data.get("id"))
+                    result = {}
+                else:
+                    result = controller.act(action, client, data)
+            except (ValueError, UnicodeError, OSError) as exc:
                 self.response({"error": str(exc)}, 409)
             else:
                 self.response(result)
@@ -900,6 +987,8 @@ def main():
     parser.add_argument("--device", help="NexArm serial device when more than one is present")
     parser.add_argument("--camera-device", help="Name or UID of the robot arm USB camera")
     parser.add_argument("--lan-host", help="IPv4 address for password-protected LAN viewing")
+    parser.add_argument("--lerobot-python", default=os.environ.get("NEXARM_LEROBOT_PYTHON"),
+                        help="Python executable in an optional LeRobot export environment")
     args = parser.parse_args()
     lan_password = os.environ.get("NEXARM_LAN_PASSWORD") if args.lan_host else None
     if args.lan_host and (args.lan_host == "0.0.0.0" or not lan_password or len(lan_password) < 12):
@@ -908,8 +997,11 @@ def main():
         parser.error("Build the browser app first with npm run build")
     controller = Controller(args.device)
     camera = CameraFeed(args.camera_device)
+    export_path = Path(args.lerobot_python).expanduser().absolute() if args.lerobot_python else ROOT / ".lerobot/bin/python"
+    exporter = str(export_path) if os.access(export_path, os.X_OK) else None
+    recorder = Recorder(controller, camera, ROOT / ".data" / "captures", exporter)
     origin = f"http://127.0.0.1:{args.port}"
-    server = ConsoleHTTPServer(("127.0.0.1", args.port), application(controller, origin, camera))
+    server = ConsoleHTTPServer(("127.0.0.1", args.port), application(controller, origin, camera, recorder=recorder))
     lan_thread = None
     if args.lan_host:
         lan_origin = f"http://{args.lan_host}:{args.port}"

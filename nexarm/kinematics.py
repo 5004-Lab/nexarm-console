@@ -166,7 +166,7 @@ def check_path(start, target, bounds):
     return points
 
 
-def plan(start, xyz, bounds, validate_path=True):
+def joint_solutions(start, xyz, bounds):
     target = np.asarray(xyz, dtype=float)
     if target[2] <= FLOOR + 5 or float(np.linalg.norm(target)) > SETUP["max_reach_mm"]:
         raise ValueError("目标不可达：超出工作空间")
@@ -174,8 +174,12 @@ def plan(start, xyz, bounds, validate_path=True):
     current = np.array(start, dtype=float)
     reference = transforms(current)["gripper_link"][1]
     adjustable = np.flatnonzero(upper[:5] > lower[:5])
-    seeds = ((current, 6.0), (current, 0.0), (ZERO, 0.0))
-    collision_error = None
+    middle = (lower + upper) / 2
+    seeds = [(current, 6.0), (current, 0.0), (ZERO, 0.0), (middle, 0.0)]
+    for shoulder, elbow, wrist in ((0.20, 0.22, 0.70), (0.75, 0.38, 0.30), (0.24, 0.75, 0.30),
+                                  (0.68, 0.82, 0.72), (0.42, 0.55, 0.14), (0.48, 0.16, 0.82)):
+        seeds.append((lower + (upper - lower) * [0.5, shoulder, elbow, wrist, 0.5, 0.5], 0.0))
+    yielded = set()
     for seed, orientation_weight in seeds:
         q = np.clip(seed, lower, upper)
         # XYZ cannot specify a gripper opening. Preserve the measured J6.
@@ -186,12 +190,10 @@ def plan(start, xyz, bounds, validate_path=True):
             error = target - position
             if np.linalg.norm(error) <= 1.25:
                 goal = np.rint(q).astype(int).tolist()
-                try:
-                    points = check_path(start, goal, bounds) if validate_path else [tcp(goal)]
-                except ValueError as exc:
-                    collision_error = exc
-                    break
-                return {"positions": goal, "path": points, "tcp": points[-1]}
+                if tuple(goal) not in yielded and math.dist(tcp(goal), xyz) <= 1.6:
+                    yielded.add(tuple(goal))
+                    yield goal
+                break
             basis = links["gripper_link"][1]
             if not len(adjustable):
                 break
@@ -204,9 +206,17 @@ def plan(start, xyz, bounds, validate_path=True):
             desired = np.r_[error, (reference - basis).ravel() * orientation_weight, 0.004 * (current[adjustable] - q[adjustable])]
             delta = np.linalg.lstsq(matrix, desired, rcond=None)[0]
             q[adjustable] = np.clip(q[adjustable] + np.clip(delta, -95, 95), lower[adjustable], upper[adjustable])
-    if collision_error:
-        raise collision_error
-    raise ValueError("目标不可达：当前关节约束下未找到可行解")
+
+
+def plan(start, xyz, bounds, validate_path=True):
+    error = None
+    for goal in joint_solutions(start, xyz, bounds):
+        try:
+            points = check_path(start, goal, bounds) if validate_path else [tcp(goal)]
+            return {"positions": goal, "path": points, "tcp": points[-1]}
+        except ValueError as exc:
+            error = exc
+    raise error or ValueError("目标不可达：当前六轴行程内未找到关节解")
 
 
 IDENTITY6 = np.eye(6)
@@ -230,19 +240,69 @@ def stage_path(start, sequence, bounds):
             "path": points, "tcp": points[-1], "phases": phases}
 
 
-def plan_cartesian(start, xyz, bounds):
-    """Prefer a path that preserves a tightly folded elbow when possible."""
-    folded = start[2] < JOINTS[2]["zero"] - 70 and np.linalg.norm(tcp(start)[:2]) < 90
-    if folded and bounds[2][0] != bounds[2][1]:
+def plan_park(start, bounds):
+    goal = SETUP["park_positions"]
+    if contacts(transforms(goal)):
+        raise ValueError("配置的复位姿态与工位发生碰撞")
+    align = [start[0], *goal[1:]]
+    yaw = [goal[0], *start[1:]]
+    lift = [start[0], goal[1], goal[2], start[3], start[4], start[5]]
+    candidates = [
+        [("复位", goal)],
+        [("肩肘腕收拢", align), ("底座回正", goal)],
+        [("先抬升", lift), ("收拢", align), ("底座回正", goal)],
+        [("底座回正", yaw), ("复位", goal)],
+    ]
+    for sequence in candidates:
         try:
-            return phased_path(start, xyz, lock_axes(bounds, {2: start[2]}))
+            return stage_path(start, sequence, bounds)
         except ValueError:
-            pass
-    return phased_path(start, xyz, bounds)
+            continue
+    raise ValueError("从当前姿态未找到可校验的复位路径")
 
 
-def phased_path(start, xyz, bounds):
-    goal = plan(start, xyz, bounds, validate_path=False)["positions"]
+def plan_cartesian(start, xyz, bounds):
+    """Solve joint configurations first, then find a collision-checked route."""
+    folded = start[2] < JOINTS[2]["zero"] - 70 and np.linalg.norm(tcp(start)[:2]) < 90
+    options = [lock_axes(bounds, {2: start[2]}), bounds] if folded and bounds[2][0] != bounds[2][1] else [bounds]
+    rejected = []
+    for limits in options:
+        held = {i: lo for i, (lo, hi) in enumerate(limits[:5]) if lo == hi}
+        for goal in joint_solutions(start, xyz, limits):
+            try:
+                result = stage_path(start, [("六轴协调", goal)], limits)
+                return dict(result, held_axes=held)
+            except ValueError:
+                rejected.append((goal, limits))
+    if not rejected:
+        raise ValueError("目标不可达：当前六轴行程内未找到关节解")
+    for goal, limits in rejected[:4]:
+        try:
+            return phased_path(start, xyz, limits, goal)
+        except ValueError:
+            continue
+    for goal, limits in rejected[:4]:
+        for alternative in joint_detours(start, goal, limits):
+            try:
+                result = stage_path(start, [("绕障协调", alternative), ("末端到位", goal)], limits)
+                return dict(result, held_axes={i: lo for i, (lo, hi) in enumerate(limits[:5]) if lo == hi})
+            except ValueError:
+                continue
+    raise ValueError("六轴有目标解，但未找到通过限位和碰撞检查的路径")
+
+
+def joint_detours(start, goal, bounds):
+    low, high = np.array(bounds).T
+    direction = np.subtract(goal, start)
+    rng = np.random.default_rng(74)
+    for fraction in (0.30, 0.55, 0.75):
+        centre = start + direction * fraction
+        for offsets in rng.uniform(-0.21, 0.21, (8, 6)):
+            offsets[5] = 0
+            yield np.clip(np.rint(centre + (high - low) * offsets), low, high).astype(int).tolist()
+
+
+def phased_path(start, xyz, bounds, goal):
     origin = np.asarray(tcp(start))
     target = np.asarray(xyz)
     coordinated = "肩腕" if bounds[2][0] == bounds[2][1] else "肩肘腕"
@@ -252,13 +312,6 @@ def phased_path(start, xyz, bounds):
         result = stage_path(start, sequence, bounds)
         result["held_axes"] = held
         return result
-    yaw_change = abs(goal[0] - start[0])
-    if yaw_change < 145 and np.linalg.norm(target - origin) < 50:
-        try:
-            return path([(f"{coordinated}协调", goal)])
-        except ValueError:
-            pass
-
     # Keep the gripper aperture throughout. Rotate only after shape clearance.
     arm = transforms(start)
     outward = arm["link1"][1][:2, 0].copy()

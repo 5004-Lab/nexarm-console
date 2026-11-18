@@ -7,6 +7,13 @@
     "prebuild": "python3 scripts/fetch-model.py",
     "build": "vite build"
   },
-  "dependencies": { "three": "0.183.2", "urdf-loader": "0.13.1", "lucide-static": "0.562.0" },
-  "devDependencies": { "vite": "7.3.1" }
+  "dependencies": {
+    "echarts": "6.1.0",
+    "lucide-static": "0.562.0",
+    "three": "0.183.2",
+    "urdf-loader": "0.13.1"
+  },
+  "devDependencies": {
+    "vite": "7.3.1"
+  }
 }

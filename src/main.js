@@ -3,12 +3,14 @@ import joints from './joints.json';
 import { createTwin } from './twin.js';
 import { createCamera } from './camera.js';
 import { createWorkspace } from './workspace.js';
+import { chart, createTelemetry, jointRangeTable } from './telemetry.js';
+import { capturePage, createCapture } from './capture.js';
+import workcell from './workcell.json';
 import { jointAngle, jointPosition, angleSpeed } from './joint-units.js';
 import bot from 'lucide-static/icons/bot.svg?raw';
 import rotate from 'lucide-static/icons/rotate-ccw.svg?raw';
 import lock from 'lucide-static/icons/lock.svg?raw';
 import cameraIcon from 'lucide-static/icons/video.svg?raw';
-import activity from 'lucide-static/icons/activity.svg?raw';
 
 const $ = selector => document.querySelector(selector);
 function operatorId() {
@@ -21,7 +23,6 @@ function operatorId() {
 }
 const headers = { 'X-Operator': operatorId() };
 const storage = 'nexarm-action-group-v2';
-const home = Array(6).fill(2048);
 const minJogSpeed = 75;
 const maxJogSpeed = 210;
 const draft = joints.map(() => ({ pos: 2048, acc: 100, speed: maxJogSpeed }));
@@ -70,11 +71,16 @@ try {
 
 $('#app').innerHTML = `
 <header class="app-bar">
-  <a class="brand" href="/" aria-label="NexArm 控制台"><span>${bot}</span><b>NexArm</b><i></i><small>基座坐标</small></a>
+  <a class="brand" href="#control" aria-label="NexArm 机械臂实验台"><span>${bot}</span><b>NexArm</b><i></i><small>机械臂实验台</small></a>
   <div class="status-items"><span id="link" class="connection"><i></i><span>等待连接</span></span><span id="voltage" class="metric">— V</span><span id="firmware" class="metric">—</span>
   <button id="arm" class="arm-button" type="button" disabled>${lock}<span>启用控制</span></button><button id="motion-stop" class="danger-button" type="button" disabled>停止</button></div>
 </header>
+<nav class="page-nav" aria-label="工作台页面">
+  <a href="#control">机械臂控制</a><a href="#telemetry">运动遥测</a><a href="#capture">数据采集</a><a href="#actions">动作组与调试</a>
+</nav>
 <main class="workspace">
+  <div class="work-page" id="page-control">
+  <div class="page-heading"><h1>机械臂控制</h1><span>基座坐标系 · mm / °</span></div>
   <section class="visuals" aria-label="并列监控">
     <section class="view-panel panel" aria-label="数字孪生">
       <header class="panel-header">
@@ -91,7 +97,7 @@ $('#app').innerHTML = `
     </section>
     <section class="camera-panel panel" aria-label="腕部彩色视频">
       <header class="panel-header">
-        <div class="panel-title"><h2>${cameraIcon} 腕部彩色视频</h2></div>
+        <div class="panel-title"><h2>${cameraIcon} 腕部 RGB 相机</h2></div>
         <output class="camera-status status-label" title="视频帧与匹配六轴反馈的时间差">等待画面</output>
       </header>
       <div class="camera-image visual-frame" id="wrist-camera-image"><canvas hidden aria-label="末端相机实时画面"></canvas><p class="camera-message">正在查找机械臂 USB 相机…</p></div>
@@ -100,11 +106,11 @@ $('#app').innerHTML = `
   </section>
   <div class="analysis-layout">
     <section class="coordinate-panel panel" aria-labelledby="coordinate-title">
-      <header class="panel-header"><div class="panel-title"><h2 id="coordinate-title">坐标控制</h2><span class="status-label">mm</span></div><button id="take-tcp" type="button">取当前位置</button></header>
+      <header class="panel-header"><div class="panel-title"><h2 id="coordinate-title">末端与关节控制</h2></div><div class="views"><button id="take-tcp" type="button">取当前位置</button><button id="park" type="button" class="park-button" disabled>${rotate} 复位</button></div></header>
       <div class="coordinate-content">
         <div class="current-tcp"><span>当前末端</span><output id="tcp-reading">—</output></div>
         <form id="target-form">
-          <div class="coordinates">${['X', 'Y', 'Z'].map(axis => `<label for="target-${axis}"><span>${axis}</span><input id="target-${axis}" type="number" min="-600" max="600" step="0.1" required aria-label="${axis} 目标坐标（毫米）" /></label>`).join('')}</div>
+          <div class="coordinates">${['X', 'Y', 'Z'].map(axis => `<label for="target-${axis}"><span>${axis}</span><input id="target-${axis}" type="number" min="${axis === 'Z' ? workcell.floor_mm + 5.1 : -workcell.max_reach_mm}" max="${workcell.max_reach_mm}" step="any" required aria-label="${axis} 目标坐标（毫米）" /></label>`).join('')}</div>
           <div class="coordinate-actions"><button id="pick-target" type="button" aria-pressed="false" title="使用当前 Z 在模型上选 XY">图上选点</button><button id="preview-target" type="submit">检查路径</button><button id="move-target" class="primary-button" type="button" disabled>移动到目标</button></div>
         </form>
         <p id="plan-notice" class="plan-notice" role="status" aria-live="polite"></p>
@@ -116,17 +122,24 @@ $('#app').innerHTML = `
         <div class="manual-footer"><span id="manual-state" role="status"></span><button id="move-joints" class="primary-button" type="submit" disabled>移动关节</button></div>
       </form>
     </section>
-    <section class="scope-panel panel" aria-labelledby="scope-title">
-      <header class="panel-header"><div class="panel-title"><h2 id="scope-title">六轴关节角度</h2><span class="status-label">最近 20 秒</span></div></header>
-      <div class="joint-chart-scope"><div id="joint-legend" aria-label="曲线图例"></div><canvas id="joint-chart" aria-label="共用坐标轴中的六轴实测曲线" role="img"></canvas></div>
-    </section>
+    ${chart('angle')}
+    ${jointRangeTable()}
   </div>
-  <details class="advanced panel">
-    <summary>动作组与调试</summary>
+  </div>
+  <div class="work-page" id="page-telemetry" hidden>
+    <div class="page-heading"><h1>运动遥测</h1><span>编码器实测 · 速度和加速度由角度差分</span></div>
+    <div class="chart-grid telemetry-grid">${['angle', 'speed', 'acceleration', 'tcp', 'gripper', 'error'].map(signal => chart(signal)).join('')}</div>
+    <div class="chart-grid geometry-grid">${chart('range')}${chart('workspace')}</div>
+  </div>
+  <div class="work-page" id="page-capture" hidden>${capturePage}</div>
+  <div class="work-page" id="page-actions" hidden>
+    <div class="page-heading"><h1>动作组与调试</h1><span>单轴点动 · 动作序列 · 串口日志</span></div>
+    <p id="action-notice" class="notice" role="status"></p>
+  <section class="advanced panel">
     <div class="advanced-layout">
       <section class="left-pane">
         <div class="quick-actions">
-          <button id="home" type="button">全部回中</button><button id="on-all" type="button">全部上电</button>
+          <button id="home" type="button">复位</button><button id="on-all" type="button">全部上电</button>
           <button id="off-all" type="button">全部掉电</button><button id="read" type="button">读取位置</button><button id="calibrate" type="button">校准中位</button>
         </div>
 
@@ -181,7 +194,8 @@ $('#app').innerHTML = `
   </aside>
 
     </div>
-  </details>
+  </section>
+  </div>
 </main>`;
 
 const cards = [...document.querySelectorAll('[data-servo]')];
@@ -192,8 +206,30 @@ const twin = createTwin($('#canvas-host'), message => {
   $('#model-note').textContent = message;
 });
 
-const camera = createCamera($(".camera-panel"), feedback => twin.update(feedback));
+const telemetry = createTelemetry();
+const capture = createCapture(api, () => liveControl() && !busy, () => frames, () => Boolean(state.remote_view));
+const camera = createCamera($('.camera-panel'), feedback => twin.update(feedback), frame => {
+  telemetry.camera(frame.stamp, frame.skew);
+  capture.frame(frame);
+});
 const workspace = createWorkspace(twin, api, () => state, () => liveControl() && !busy);
+
+function showPage() {
+  const destinations = ['control', 'telemetry', 'capture', 'actions'];
+  const requested = location.hash.slice(1);
+  const activePage = destinations.includes(requested) ? requested : 'control';
+  for (const destination of destinations) {
+    const shown = destination === activePage;
+    $(`#page-${destination}`).hidden = !shown;
+    const link = $(`.page-nav a[href="#${destination}"]`);
+    if (shown) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  if (activePage === 'capture') capture.refresh();
+  window.scrollTo(0, 0);
+}
+window.addEventListener('hashchange', showPage);
+showPage();
 
 function setView(view) {
   twin.view(view);
@@ -251,6 +287,8 @@ async function pollLogs() {
   finally { if (active) setTimeout(pollLogs, 400); }
 }
 function notice(message, error = false, record = false) {
+  $('#action-notice').textContent = message;
+  $('#action-notice').classList.toggle('error', error);
   $('#notice').textContent = message;
   $('#notice').classList.toggle('error', error);
   if (record) {
@@ -269,7 +307,7 @@ async function api(action, data = {}, retry = true) {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json', 'X-Control-Key': key },
     body: JSON.stringify(data),
-    signal: AbortSignal.timeout(['download', 'board-run'].includes(action) ? 30000 : 5000),
+    signal: AbortSignal.timeout(['download', 'board-run', 'capture-start'].includes(action) ? 30000 : 5000),
   });
   if (response.status === 403 && retry) {
     key = null;
@@ -478,10 +516,9 @@ $('#read').onclick = () => {
   cancelJog();
   perform('read');
 };
-$('#home').onclick = () => {
-  if (!confirm('确认恢复六轴的默认回中位置？')) return;
-  const frame = { time: 2500, servos: draft.map((s, i) => ({ pos: home[i], acc: s.acc })) };
-  perform('run', { frames: [frame], loops: 1 });
+$('#home').onclick = $('#park').onclick = async () => {
+  const planned = await perform('park');
+  if (planned) twin.setPath(planned.path);
 };
 $('#on-all').onclick = () => perform('torque', { enabled: true });
 $('#off-all').onclick = () => {
@@ -537,12 +574,14 @@ function render() {
     for (const id of ids) $(`#${id}`).disabled = condition;
   };
   disable(['on-all', 'off-all', 'calibrate', 'erase', 'board-run'], !maintenance);
-  disable(['home'], !enabled);
+  disable(['home', 'park'], !enabled);
   disable(['read'], state.remote_view || !state.connected);
   disable(['board-stop'], state.remote_view || state.remote_control || !state.connected);
   disable(['stop', 'motion-stop'], state.remote_view || !state.connected || (state.remote_control && state.board != null) ||
     (!state.armed && !state.task && !state.moving && state.board == null));
   workspace.update(state);
+  telemetry.update(state);
+  capture.render(state);
   disable(['run'], !enabled || !frames.length);
   disable(['download'], !maintenance || !frames.length);
   disable(['load', 'frame-time'], !editing);
@@ -583,7 +622,9 @@ async function poll() {
         initialized = true;
       }
     }
-    if (state.result && state.result !== lastResult) notice(state.result, /中断|无效|失效|未到位|碰撞/.test(state.result));
+    if (state.result && state.result !== lastResult) {
+      notice(state.result, /中断|无效|失效|未到位|碰撞|跟踪偏差|未通过|超时|已停止/.test(state.result));
+    }
     lastResult = state.result;
   } catch {
     if (initialized) notice('本机服务连接中断，实时控制已锁定', true);

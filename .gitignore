@@ -5,6 +5,8 @@ __pycache__/
 *.py[cod]
 /.pytest_cache/
 /.camera/
+/.data/
+/.lerobot/
 /public/model/nexarm.urdf
 /public/model/meshes/
 /.env

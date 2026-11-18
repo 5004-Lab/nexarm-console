@@ -7,7 +7,7 @@ const messages = {
   waiting: '正在等待实时画面…',
 };
 
-export function createCamera(panel, onPose) {
+export function createCamera(panel, onPose, onFrame = () => {}) {
   const canvas = panel.querySelector('canvas');
   const context = canvas.getContext('2d');
   const message = panel.querySelector('.camera-message');
@@ -64,6 +64,7 @@ export function createCamera(panel, onPose) {
           details.hidden = false;
           deadline = now + 480;
           if (paired) onPose(pose);
+          onFrame({ stamp: capture, skew: paired ? Number(skew) : null, width: bitmap.width, height: bitmap.height, rate });
           status(paired ? `同步 · ${skew} ms` : '实时画面 · 等待关节反馈');
         } finally {
           bitmap.close();
