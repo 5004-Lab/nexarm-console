@@ -1,10 +1,12 @@
 import './styles.css';
+import './workbench.css';
 import joints from './joints.json';
 import { createTwin } from './twin.js';
 import { createCamera } from './camera.js';
 import { createWorkspace } from './workspace.js';
 import { chart, createTelemetry, jointRangeTable } from './telemetry.js';
 import { capturePage, createCapture } from './capture.js';
+import { historyToolbar, observationForm, createHistory } from './history.js';
 import workcell from './workcell.json';
 import { jointAngle, jointPosition, angleSpeed } from './joint-units.js';
 import bot from 'lucide-static/icons/bot.svg?raw';
@@ -37,6 +39,7 @@ let busy = false;
 let armedLocally = false;
 let lastResult;
 let active = true;
+let transportLost = false;
 let modelReady = false;
 let modelError = '';
 const jogTimers = new Map();
@@ -78,6 +81,7 @@ $('#app').innerHTML = `
 <nav class="page-nav" aria-label="工作台页面">
   <a href="#control">机械臂控制</a><a href="#telemetry">运动遥测</a><a href="#capture">数据采集</a><a href="#actions">动作组与调试</a>
 </nav>
+${historyToolbar}
 <main class="workspace">
   <div class="work-page" id="page-control">
   <div class="page-heading"><h1>机械臂控制</h1><span>基座坐标系 · mm / °</span></div>
@@ -95,13 +99,21 @@ $('#app').innerHTML = `
       </div>
       <footer class="view-footer"><span><span class="legend-dot"></span> 末端 <span class="legend-dot target-dot"></span> 目标</span><span id="rate">等待六轴反馈</span></footer>
     </section>
-    <section class="camera-panel panel" aria-label="腕部彩色视频">
+    <section class="camera-panel panel" id="wrist-camera" aria-label="腕部彩色视频">
       <header class="panel-header">
         <div class="panel-title"><h2>${cameraIcon} 腕部 RGB 相机</h2></div>
         <output class="camera-status status-label" title="视频帧与匹配六轴反馈的时间差">等待画面</output>
       </header>
       <div class="camera-image visual-frame" id="wrist-camera-image"><canvas hidden aria-label="末端相机实时画面"></canvas><p class="camera-message">正在查找机械臂 USB 相机…</p></div>
-      <footer class="view-footer"><span>腕部视角</span><span class="camera-details" hidden></span></footer>
+      <footer class="view-footer"><span>腕部视角 · icSpring</span><span class="camera-details" hidden></span></footer>
+    </section>
+    <section class="camera-panel panel" id="external-camera" aria-label="第三人称彩色视频">
+      <header class="panel-header">
+        <div class="panel-title"><h2>${cameraIcon} 第三人称相机</h2></div>
+        <output class="camera-status status-label">等待画面</output>
+      </header>
+      <div class="camera-image visual-frame"><canvas hidden aria-label="第三人称相机实时画面"></canvas><p class="camera-message">正在查找第三人称 USB 相机…</p></div>
+      <footer class="view-footer"><span>第三人称视角 · HDR CAMERA-A</span><span class="camera-details" hidden></span></footer>
     </section>
   </section>
   <div class="analysis-layout">
@@ -127,11 +139,13 @@ $('#app').innerHTML = `
   </div>
   </div>
   <div class="work-page" id="page-telemetry" hidden>
-    <div class="page-heading"><h1>运动遥测</h1><span>编码器实测 · 速度和加速度由角度差分</span></div>
-    <div class="chart-grid telemetry-grid">${['angle', 'speed', 'acceleration', 'tcp', 'gripper', 'error'].map(signal => chart(signal)).join('')}</div>
+    <div class="page-heading"><h1>运动遥测与操作回看</h1><span>历史记录持续保留 · 时间轴可缩放 · 紫线为所选记录的末端轨迹</span></div>
+    <nav class="signal-nav" aria-label="遥测信号">${[['angle','关节角度'],['tcp','末端轨迹'],['speed','角速度'],['acceleration','角加速度'],['error','跟踪误差'],['gripper','夹爪开度'],['sync','画面同步']].map(([key,label]) => `<button type="button" data-signal="${key}" aria-pressed="${key === 'angle'}">${label}</button>`).join('')}</nav>
+    <div class="chart-grid telemetry-grid">${['angle', 'speed', 'acceleration', 'tcp', 'gripper', 'error', 'sync'].map(signal => chart(signal)).join('')}</div>
     <div class="chart-grid geometry-grid">${chart('range')}${chart('workspace')}</div>
+    <section class="operation-events"><header class="section-heading"><h2>操作阶段与事件</h2></header><table><thead><tr><th>记录时间</th><th>事件 / 阶段标注</th></tr></thead><tbody id="operation-events"></tbody></table></section>
   </div>
-  <div class="work-page" id="page-capture" hidden>${capturePage}</div>
+  <div class="work-page" id="page-capture" hidden>${observationForm}<details class="automated-capture"><summary>动作组重复采集（腕部单视角）与 LeRobot 导出</summary>${capturePage}</details></div>
   <div class="work-page" id="page-actions" hidden>
     <div class="page-heading"><h1>动作组与调试</h1><span>单轴点动 · 动作序列 · 串口日志</span></div>
     <p id="action-notice" class="notice" role="status"></p>
@@ -198,6 +212,34 @@ $('#app').innerHTML = `
   </div>
 </main>`;
 
+const commandColumn = Object.assign(document.createElement('aside'), { className: 'command-column', ariaLabel: '机械臂控制台' });
+commandColumn.append($('.coordinate-panel'));
+$('#page-control').insertBefore(commandColumn, $('.visuals'));
+const jointMonitor = document.createElement('section');
+jointMonitor.className = 'joint-monitor';
+jointMonitor.innerHTML = `<header class="section-heading"><h2>六轴状态与跟踪</h2><span>实测 / 指令 / 误差</span></header><table aria-label="六轴状态与跟踪"><thead><tr><th>轴</th><th>实测 °</th><th>指令 °</th><th>误差 °</th><th>速度 °/s</th></tr></thead><tbody>${joints.map((joint,i) => `<tr data-joint-monitor="${i}"><th title="${joint.name}">J${i+1}</th><td>—</td><td>—</td><td>—</td><td>—</td></tr>`).join('')}</tbody></table><dl class="controller-details"><div><dt>供电状态</dt><dd id="controller-power">—</dd></div><div><dt>控制模式</dt><dd id="controller-mode">—</dd></div><div><dt>运动状态</dt><dd id="controller-motion">—</dd></div></dl>`;
+commandColumn.append(jointMonitor);
+const manualInputs = $('.manual-inputs');
+const jointTable = jointMonitor.querySelector('table');
+jointTable.querySelector('thead tr').innerHTML = '<th>轴</th><th>实测 °</th><th>目标 °</th><th>指令 °</th><th>误差 °</th><th>速度 °/s</th>';
+for (const row of jointTable.querySelectorAll('tbody tr')) {
+  const i = Number(row.dataset.jointMonitor);
+  [...row.querySelectorAll('td')].forEach((cell,index) => { cell.dataset.jointReading = index; });
+  const target = row.insertCell(2); target.append($(`#manual-${i}`));
+}
+manualInputs.replaceWith(jointTable);
+jointMonitor.querySelector('.section-heading').remove();
+for (const button of document.querySelectorAll('[data-signal]')) button.onclick = () => {
+  for (const figure of document.querySelectorAll('#page-telemetry .telemetry-grid [data-figure]')) figure.hidden = figure.dataset.figure !== button.dataset.signal;
+  for (const peer of document.querySelectorAll('[data-signal]')) peer.setAttribute('aria-pressed', String(peer === button));
+};
+for (const figure of document.querySelectorAll('#page-telemetry .telemetry-grid [data-figure]')) figure.hidden = figure.dataset.figure !== 'angle';
+for (const panel of document.querySelectorAll('.camera-panel')) {
+  const tools = document.createElement('div'); tools.className = 'camera-tools';
+  tools.innerHTML = '<button type="button" data-camera-fullscreen>放大查看</button><button type="button" data-camera-download>下载原图</button>';
+  panel.querySelector('.view-footer').append(tools);
+}
+
 const cards = [...document.querySelectorAll('[data-servo]')];
 const twin = createTwin($('#canvas-host'), message => {
   modelError = message;
@@ -207,11 +249,13 @@ const twin = createTwin($('#canvas-host'), message => {
 });
 
 const telemetry = createTelemetry();
+createHistory(telemetry, twin, api, () => Boolean(state.remote_view));
 const capture = createCapture(api, () => liveControl() && !busy, () => frames, () => Boolean(state.remote_view));
-const camera = createCamera($('.camera-panel'), feedback => twin.update(feedback), frame => {
+const camera = createCamera($('#wrist-camera'), feedback => twin.update(feedback), frame => {
   telemetry.camera(frame.stamp, frame.skew);
   capture.frame(frame);
 });
+createCamera($('#external-camera'), () => {}, () => {}, { endpoint: '/api/camera/external', syncPose: false });
 const workspace = createWorkspace(twin, api, () => state, () => liveControl() && !busy);
 
 function showPage() {
@@ -546,6 +590,14 @@ for (const action of ['download', 'board-run', 'erase']) {
 }
 
 function render() {
+  for (const row of document.querySelectorAll('[data-joint-monitor]')) {
+    const i = Number(row.dataset.jointMonitor), actual = state.angles?.[i], command = state.action_angles?.[i];
+    const values = [actual, command, actual != null && command != null ? command - actual : null, state.velocity?.[i]];
+    [...row.querySelectorAll('[data-joint-reading]')].forEach(cell => { const index = Number(cell.dataset.jointReading); cell.textContent = Number.isFinite(values[index]) ? values[index].toFixed(2) : '—'; });
+  }
+  $('#controller-power').textContent = state.connected ? state.power_ok ? '供电正常' : '供电待检查' : '等待反馈';
+  $('#controller-mode').textContent = state.bridge ? '电脑桥接' : '板载协议';
+  $('#controller-motion').textContent = state.moving ? state.motion_phase?.name || '正在执行' : '静止';
   const enabled = liveControl() && !busy;
   const maintenance = enabled && !state.remote_control;
   const editing = !state.task;
@@ -558,7 +610,8 @@ function render() {
   $('#arm').disabled = state.remote_view || busy || (!state.armed && (!state.connected || !state.power_ok || state.operator_busy));
   $('#arm').classList.toggle('engaged', Boolean(state.armed));
   $('#twin-status').textContent = modelError ? '模型加载失败' : !modelReady ? '加载模型' : state.connected ? '实测姿态' : initialized ? '反馈已暂停' : '等待反馈';
-  $('#rate').textContent = state.connected ? `${state.hz} Hz · ${state.port?.replace('/dev/cu.', '')}` : '等待六轴反馈';
+  $('#rate').textContent = state.connected ? `${state.hz} Hz · ${state.port?.split('/').pop()?.replace(/^usb-/, '')}` : '等待六轴反馈';
+  $('#rate').title = state.port || '';
   for (const [i, card] of cards.entries()) {
     writeCard(i);
     card.querySelector('.angle').textContent = state.angles ? `${state.angles[i].toFixed(1)}°` : '—';
@@ -604,6 +657,10 @@ async function poll() {
     const response = await fetch('/api/state', { headers, cache: 'no-store', signal: AbortSignal.timeout(900) });
     if (!response.ok) throw Error('连接中断');
     const latest = await response.json();
+    if (transportLost) {
+      notice('服务连接已恢复');
+      transportLost = false;
+    }
     const disconnected = state.connected && !latest.connected;
     const disarmed = state.armed && !latest.armed;
     state = latest;
@@ -627,6 +684,7 @@ async function poll() {
     }
     lastResult = state.result;
   } catch {
+    transportLost = true;
     if (initialized) notice('本机服务连接中断，实时控制已锁定', true);
     state = {};
     armedLocally = false;

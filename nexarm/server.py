@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import signal
 import struct
 import threading
 import time
@@ -20,7 +21,9 @@ import serial
 
 from . import kinematics
 from .camera_feed import CameraFeed
+from .linux_serial import initialize_generic_ch340
 from .recording import Recorder
+from .history import History
 
 ROOT = Path(__file__).resolve().parents[1]
 JOINTS = kinematics.JOINTS
@@ -753,6 +756,8 @@ class Controller:
         task["next_at"] = now + frame["time"] / 1000
 
     def run_link(self, path):
+        if initialize_generic_ch340(path):
+            print(f"USB: initialized generic CH340 at 1000000 baud: {path}", flush=True)
         link = serial.Serial(baudrate=1_000_000, timeout=0.015, write_timeout=0.25, exclusive=True)
         link.port = path
         link.dtr = False
@@ -801,6 +806,7 @@ class Controller:
     def run(self):
         while not self.closing.is_set():
             paths = glob.glob("/dev/cu.usbserial-*") + glob.glob("/dev/cu.wchusbserial*")
+            paths += glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
             path = self.requested_port or (paths[0] if len(paths) == 1 else None)
             if path is None:
                 with self.lock:
@@ -822,7 +828,7 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
     request_queue_size = 64
 
 
-def application(controller, origin, camera, view_password=None, recorder=None):
+def application(controller, origin, camera, view_password=None, recorder=None, external_camera=None, history=None):
     key = secrets.token_urlsafe(32)
     viewing = view_password is not None
     authorization = "Basic " + base64.b64encode(f"nexarm:{view_password}".encode()).decode() if viewing else ""
@@ -862,13 +868,16 @@ def application(controller, origin, camera, view_password=None, recorder=None):
             self.end_headers()
             self.wfile.write(body)
 
-        def camera_frame(self):
+        def camera_frame(self, feed, with_pose=True):
+            if feed is None:
+                self.send_error(404)
+                return
             values = parse_qs(urlsplit(self.path).query)
             try:
                 after = float(values.get("after", ["0"])[0])
             except ValueError:
                 after = 0
-            status, frame = camera.frame(after)
+            status, frame = feed.frame(after)
             self.send_response(200 if frame else 204)
             self.send_header("X-Camera-State", status)
             self.send_header("Cache-Control", "no-store")
@@ -877,7 +886,7 @@ def application(controller, origin, camera, view_password=None, recorder=None):
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Content-Length", str(len(jpeg)))
                 self.send_header("X-Camera-Time", str(stamp))
-                sample = controller.match_feedback(stamp)
+                sample = controller.match_feedback(stamp) if with_pose else None
                 if sample:
                     skew, joints = sample
                     self.send_header("X-Pose-Skew", str(skew))
@@ -893,7 +902,28 @@ def application(controller, origin, camera, view_password=None, recorder=None):
             if not self.allow_view():
                 return
             path = urlsplit(self.path).path
-            if path == "/api/capture-state" and recorder and not viewing:
+            if path == "/api/history/sessions" and history:
+                self.response(history.sessions())
+            elif path in ("/api/history/samples", "/api/history/archive") and history:
+                try:
+                    params = parse_qs(urlsplit(self.path).query)
+                    identifier = params.get("id", [""])[0]
+                    if path.endswith("samples"):
+                        self.response(history.samples(identifier, int(params.get("after", ["0"])[0]), int(params.get("limit", ["2000"])[0])))
+                    else:
+                        archive = history.archive(identifier)
+                        with archive.open("rb") as stream:
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/zip")
+                            self.send_header("Content-Length", str(archive.stat().st_size))
+                            self.send_header("Content-Disposition", f'attachment; filename="nexarm-{identifier}.zip"')
+                            self.end_headers()
+                            shutil.copyfileobj(stream, self.wfile)
+                except (ValueError, OSError) as exc:
+                    self.response({"error": str(exc)}, 400)
+            elif path == "/api/camera-info":
+                self.response({name: {"configured_resolution": feed.resolution, "requested_fps": feed.fps, "format": feed.input_format, "status": feed.frame(0)[0]} for name, feed in (("wrist", camera), ("external", external_camera)) if feed is not None and hasattr(feed, "resolution")})
+            elif path == "/api/capture-state" and recorder and not viewing:
                 self.response(recorder.snapshot())
             elif path == "/api/capture-library" and recorder and not viewing:
                 self.response(recorder.library())
@@ -923,7 +953,9 @@ def application(controller, origin, camera, view_password=None, recorder=None):
                     except (BrokenPipeError, ConnectionResetError):
                         pass
             elif path == "/api/camera":
-                self.camera_frame()
+                self.camera_frame(camera)
+            elif path == "/api/camera/external":
+                self.camera_frame(external_camera, with_pose=False)
             elif self.path == "/api/state":
                 state = controller.snapshot(None if viewing else self.client())
                 if viewing:
@@ -962,7 +994,13 @@ def application(controller, origin, camera, view_password=None, recorder=None):
                 data = json.loads(self.rfile.read(size))
                 if not isinstance(data, dict):
                     raise ValueError("请求格式无效")
-                if action == "capture-start" and recorder:
+                if action == "observation-start" and history:
+                    result = history.start(data)
+                elif action == "observation-stop" and history:
+                    result = history.stop()
+                elif action == "observation-mark" and history:
+                    result = history.annotate(data)
+                elif action == "capture-start" and recorder:
                     result = recorder.start(client, data)
                 elif action == "capture-export" and recorder:
                     recorder.export(data.get("id"))
@@ -986,6 +1024,11 @@ def main():
     parser.add_argument("--port", type=int, default=8765, help="loopback HTTP port")
     parser.add_argument("--device", help="NexArm serial device when more than one is present")
     parser.add_argument("--camera-device", help="Name or UID of the robot arm USB camera")
+    parser.add_argument("--camera-format", choices=("mjpeg", "yuyv422"), default="mjpeg")
+    parser.add_argument("--camera-resolution", default="640x480")
+    parser.add_argument("--external-camera-device", help="Third-person USB camera device")
+    parser.add_argument("--external-camera-format", choices=("mjpeg", "yuyv422"), default="mjpeg")
+    parser.add_argument("--external-camera-resolution", default="1920x1080")
     parser.add_argument("--lan-host", help="IPv4 address for password-protected LAN viewing")
     parser.add_argument("--lerobot-python", default=os.environ.get("NEXARM_LEROBOT_PYTHON"),
                         help="Python executable in an optional LeRobot export environment")
@@ -996,16 +1039,20 @@ def main():
     if not (ROOT / "dist/index.html").is_file():
         parser.error("Build the browser app first with npm run build")
     controller = Controller(args.device)
-    camera = CameraFeed(args.camera_device)
+    camera = CameraFeed(args.camera_device, args.camera_format, args.camera_resolution)
+    external_camera = CameraFeed(args.external_camera_device, args.external_camera_format, args.external_camera_resolution) if args.external_camera_device else None
+    history = History(controller, {"wrist": camera, "external": external_camera}, ROOT / ".data" / "observations")
+    history_worker = threading.Thread(target=history.run, daemon=True)
+    history_worker.start()
     export_path = Path(args.lerobot_python).expanduser().absolute() if args.lerobot_python else ROOT / ".lerobot/bin/python"
     exporter = str(export_path) if os.access(export_path, os.X_OK) else None
     recorder = Recorder(controller, camera, ROOT / ".data" / "captures", exporter)
     origin = f"http://127.0.0.1:{args.port}"
-    server = ConsoleHTTPServer(("127.0.0.1", args.port), application(controller, origin, camera, recorder=recorder))
+    server = ConsoleHTTPServer(("127.0.0.1", args.port), application(controller, origin, camera, recorder=recorder, external_camera=external_camera, history=history))
     lan_thread = None
     if args.lan_host:
         lan_origin = f"http://{args.lan_host}:{args.port}"
-        lan = ConsoleHTTPServer((args.lan_host, args.port), application(controller, lan_origin, camera, lan_password))
+        lan = ConsoleHTTPServer((args.lan_host, args.port), application(controller, lan_origin, camera, lan_password, external_camera=external_camera, history=history))
         lan_thread = threading.Thread(target=lan.serve_forever, daemon=True)
         lan_thread.start()
         print(f"NexArm LAN view: {lan_origin}", flush=True)
@@ -1013,18 +1060,30 @@ def main():
     camera_worker = threading.Thread(target=camera.run, daemon=True)
     worker.start()
     camera_worker.start()
+    external_worker = None
+    if external_camera:
+        external_worker = threading.Thread(target=external_camera.run, daemon=True)
+        external_worker.start()
     print(f"NexArm Console: {origin}", flush=True)
+    def interrupt_service(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupt_service)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         controller.closing.set()
+        history.closed.set()
+        history_worker.join(3)
         if lan_thread is not None:
             lan.shutdown()
             lan.server_close()
         camera.closed.set()
         camera_worker.join(2)
+        if external_camera:
+            external_camera.closed.set()
+            external_worker.join(2)
         worker.join(2)
         server.server_close()
 

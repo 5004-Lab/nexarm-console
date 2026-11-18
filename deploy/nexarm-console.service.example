@@ -1,0 +1,16 @@
+[Unit]
+Description=NexArm Console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/nexarm-console
+EnvironmentFile=%h/nexarm-console/.env.lan
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/nexarm-console/.venv/bin/python -m nexarm.server --lan-host ${NEXARM_LAN_HOST} --device ${NEXARM_SERIAL_DEVICE} --camera-device ${NEXARM_WRIST_DEVICE} --camera-format yuyv422 --camera-resolution 640x480 --external-camera-device ${NEXARM_EXTERNAL_DEVICE} --external-camera-resolution 2592x1944
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

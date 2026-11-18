@@ -1,12 +1,12 @@
 import { init, use } from 'echarts/core';
 import { CustomChart, LineChart, ScatterChart } from 'echarts/charts';
-import { GraphicComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapContinuousComponent } from 'echarts/components';
+import { DataZoomComponent, GraphicComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapContinuousComponent } from 'echarts/components';
 import { SVGRenderer } from 'echarts/renderers';
 import joints from './joints.json';
 import reach from './reach.json';
 import { jointAngle } from './joint-units.js';
 
-use([CustomChart, LineChart, ScatterChart, GraphicComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapContinuousComponent, SVGRenderer]);
+use([CustomChart, LineChart, ScatterChart, DataZoomComponent, GraphicComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapContinuousComponent, SVGRenderer]);
 
 // MATLAB light-theme ColorOrder (gem).
 const gem = ['#0072BD', '#D95319', '#EDB120', '#7E2F8E', '#77AC30', '#4DBEEE'];
@@ -14,7 +14,8 @@ const fontFamily = 'Arial, "PingFang SC", "Microsoft YaHei", sans-serif';
 const axisNames = joints.map((_, i) => `J${i + 1}`);
 const limits = joints.map((joint, i) => [jointAngle(i, joint.min), jointAngle(i, joint.max)].sort((a, b) => a - b));
 const closedAngle = limits[5][1];
-const windowSeconds = 20;
+let displaySeconds = 0;
+let operationEvents = [];
 const figures = {
   angle: { title: '六轴关节角度', axis: '关节角度 (°)', names: axisNames, pad: 10 },
   speed: { title: '六轴角速度', axis: '角速度 (°/s)', names: axisNames, pad: 3, symmetric: true },
@@ -73,8 +74,8 @@ function rounded(value) {
 function lineDomain(figure, samples) {
   if (figure.range) return [figure.range[0], figure.range[1], (figure.range[1] - figure.range[0]) / 5];
   const values = samples.flatMap(sample => (sample.values || []).filter(Number.isFinite));
-  const lo = Math.min(-figure.pad, ...values);
-  const hi = Math.max(figure.pad, ...values);
+  const lo = values.reduce((low, value) => Math.min(low, value), -figure.pad);
+  const hi = values.reduce((high, value) => Math.max(high, value), figure.pad);
   const magnitude = Math.max(Math.abs(lo), hi);
   const low = figure.symmetric ? -magnitude : lo;
   const high = figure.symmetric ? magnitude : hi;
@@ -85,17 +86,40 @@ function lineDomain(figure, samples) {
 }
 
 function timeOption(figure, samples) {
+  // Retain all source samples; select per-channel extrema only for rendering long runs.
+  if (samples.length > 6000) {
+    const bucketSize = Math.ceil(samples.length / 400);
+    const selected = new Set([0, samples.length - 1]);
+    for (let start = 0; start < samples.length; start += bucketSize) {
+      const end = Math.min(samples.length, start + bucketSize);
+      selected.add(start); selected.add(end - 1);
+      for (let channel = 0; channel < figure.names.length; channel++) {
+        let low, high;
+        for (let i = start; i < end; i++) {
+          const value = samples[i].values?.[channel];
+          if (!Number.isFinite(value)) { selected.add(i); continue; }
+          if (low == null || value < samples[low].values[channel]) low = i;
+          if (high == null || value > samples[high].values[channel]) high = i;
+        }
+        if (low != null) selected.add(low);
+        if (high != null) selected.add(high);
+      }
+    }
+    samples = [...selected].sort((a,b) => a-b).map(index => samples[index]);
+  }
   const tail = samples.at(-1)?.stamp ?? 0;
-  const span = tail - (samples[0]?.stamp ?? tail);
-  const seconds = [3, 5, 10, 15, windowSeconds].find(value => value >= span) ?? windowSeconds;
+  const origin = samples[0]?.stamp ?? tail;
+  const elapsed = Math.max(1, tail - origin);
   const [min, max, interval] = lineDomain(figure, samples);
   const hasData = samples.some(sample => sample.values?.some(Number.isFinite));
   return {
-    ...base, grid,
+    ...base, grid: { ...grid, bottom: 76 },
+    dataZoom: [{ id: 'time-zoom', type: 'slider', bottom: 4, height: 19, filterMode: 'none' }, { id: 'time-inside', type: 'inside', filterMode: 'none' }],
     legend: { show: true, top: 9, right: 20, icon: 'roundRect', itemWidth: 14, itemHeight: 3,
       padding: [6, 8], borderColor: '#ccd1d6', borderWidth: 1, backgroundColor: '#fff', textStyle },
-    xAxis: { ...axis, type: 'value', min: -seconds, max: 0, interval: seconds > 12 ? 5 : seconds > 5 ? 2 : 1,
-      name: '相对时间 (s)', nameLocation: 'middle', nameGap: 30 },
+    xAxis: { ...axis, type: 'value', min: displaySeconds ? Math.max(0, elapsed - displaySeconds) : 0, max: elapsed, splitNumber: 6,
+      axisLabel: { ...axis.axisLabel, formatter: rounded },
+      name: '记录开始后的时间 (s)', nameLocation: 'middle', nameGap: 29 },
     yAxis: { ...axis, type: 'value', min, max, interval, axisLabel: { ...axis.axisLabel, formatter: rounded },
       name: figure.axis, nameLocation: 'middle', nameGap: 43 },
     graphic: { id: 'empty', type: 'text', silent: true, left: 'center', top: 'middle',
@@ -104,8 +128,10 @@ function timeOption(figure, samples) {
       valueFormatter: value => Number.isFinite(value) ? rounded(value) : '—' },
     series: figure.names.map((name, i) => ({
       id: name, type: 'line', name, showSymbol: false, connectNulls: false, lineStyle: { width: 1.65 },
+      sampling: 'lttb',
+      markLine: i === 0 ? { symbol: 'none', silent: true, label: { show: false }, lineStyle: { color: '#8795a6', type: 'dotted' }, data: operationEvents.slice(-40).map(event => ({ xAxis: event.stamp - origin, name: event.label })) } : undefined,
       data: samples.flatMap((sample, index) => {
-        const t = sample.stamp - tail;
+        const t = sample.stamp - origin;
         const point = [t, sample.values?.[i] ?? null];
         return index && sample.stamp - samples[index - 1].stamp > 0.6 ? [[t - 0.001, null], point] : [point];
       }),
@@ -212,7 +238,9 @@ function mountFigure(panel, getOption, getRevision) {
     link.click();
     setTimeout(() => URL.revokeObjectURL(href), 1000);
   };
-  return () => update();
+  const refresh = () => update();
+  refresh.resetZoom = () => figure?.dispatchAction({ type: 'dataZoom', start: 0, end: 100 });
+  return refresh;
 }
 
 export function createTelemetry() {
@@ -221,6 +249,8 @@ export function createTelemetry() {
   let tcp = null;
   let revision = null;
   let refresh = 0;
+  let archiveMode = false;
+  let historyVersion = 0;
   const limitRows = [...document.querySelectorAll('[data-limit]')];
   const plots = [...document.querySelectorAll('[data-figure]')].map(panel => {
     const key = panel.dataset.figure;
@@ -229,7 +259,7 @@ export function createTelemetry() {
       : () => timeOption(figures[key], history[key]);
     const version = key === 'range' ? () => angles?.join(',')
       : key === 'workspace' ? () => tcp?.slice(0, 2).join(',')
-      : () => history[key].at(-1)?.stamp;
+      : () => `${history[key].at(-1)?.stamp}:${historyVersion}:${displaySeconds}`;
     return mountFigure(panel, option, version);
   });
 
@@ -237,7 +267,7 @@ export function createTelemetry() {
     const series = history[key];
     if (series.at(-1)?.stamp > stamp) series.length = 0;
     series.push({ stamp, values });
-    while (series[0].stamp < stamp - windowSeconds) series.shift();
+    if (key === 'sync' && series.length > 10000) series.shift();
   }
 
   function redraw() {
@@ -260,7 +290,7 @@ export function createTelemetry() {
         row.querySelector('output').textContent = angle == null ? '—' : angle.toFixed(1);
         row.classList.toggle('outside', angle != null && (angle < limits[i][0] - 0.01 || angle > limits[i][1] + 0.01));
       });
-      if (live) {
+      if (live && !archiveMode) {
         revision = state.revision;
         add('angle', revision, angles);
         add('speed', revision, state.velocity);
@@ -268,16 +298,36 @@ export function createTelemetry() {
         add('tcp', revision, tcp);
         add('gripper', revision, [Math.max(0, Math.min(100, 100 * (1 - angles[5] / closedAngle)))]);
         add('error', revision, state.action_angles?.map((value, i) => value - angles[i]));
-      } else {
+      } else if (!live && !archiveMode) {
         revision = null;
         Object.values(history).forEach(series => { series.length = 0; });
       }
       redraw();
     },
     camera(stamp, skew) {
+      if (archiveMode) return;
       if (!Number.isFinite(skew)) return;
       add('sync', stamp, [skew]);
       redraw();
     },
+    load(samples, events = []) {
+      archiveMode = true;
+      for (const key of ['angle', 'speed', 'acceleration', 'tcp', 'gripper', 'error', 'sync']) history[key] = [];
+      for (const sample of samples) {
+        const stamp = sample.stamp;
+        const actual = sample.connected ? sample.angles : null;
+        add('angle', stamp, actual);
+        add('speed', stamp, sample.velocity);
+        add('acceleration', stamp, sample.acceleration);
+        add('tcp', stamp, sample.connected ? sample.tcp : null);
+        add('gripper', stamp, actual ? [Math.max(0, Math.min(100, 100 * (1 - actual[5] / closedAngle)))] : null);
+        add('error', stamp, actual && sample.action_angles ? sample.action_angles.map((v, i) => v - actual[i]) : null);
+        add('sync', stamp, Number.isFinite(sample.images?.wrist?.pose_skew_ms) ? [sample.images.wrist.pose_skew_ms] : null);
+      }
+      operationEvents = events;
+      historyVersion++;
+      redraw();
+    },
+    window(seconds) { displaySeconds = seconds; historyVersion++; plots.forEach(plot => plot.resetZoom()); redraw(); },
   };
 }

@@ -12,7 +12,7 @@ export function createTwin(host, onLoad) {
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   } catch {
     onLoad('此浏览器无法创建 WebGL 视口');
-    return { update() {}, view() {}, pick() {}, target() {}, setPath() {} };
+    return { update() {}, view() {}, pick() {}, target() {}, setPath() {}, setTrace() {} };
   }
   renderer.setPixelRatio(Math.min(devicePixelRatio, 1.8));
   renderer.shadowMap.enabled = true;
@@ -107,6 +107,8 @@ export function createTwin(host, onLoad) {
   const trajectory = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x0072bd }));
   trajectory.visible = false;
   scene.add(trajectory);
+  const trace = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x8663b8, transparent: true, opacity: 0.8 }));
+  scene.add(trace);
 
   const slice = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({
     color: 0x0072bd, size: 4, sizeAttenuation: false, opacity: 0.65, transparent: true, depthTest: false,
@@ -253,6 +255,11 @@ export function createTwin(host, onLoad) {
       trajectory.geometry.dispose();
       trajectory.geometry = new THREE.BufferGeometry().setFromPoints(points.map(coordinates));
       trajectory.visible = points.length > 1;
+    },
+    setTrace(points) {
+      trace.geometry.dispose();
+      trace.geometry = new THREE.BufferGeometry().setFromPoints(points.map(coordinates));
+      trace.visible = points.length > 1;
     },
   };
 }

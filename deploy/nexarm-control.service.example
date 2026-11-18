@@ -1,0 +1,14 @@
+[Unit]
+Description=NexArm LAN Control
+After=nexarm-console.service
+Requires=nexarm-console.service
+
+[Service]
+WorkingDirectory=%h/nexarm-console
+EnvironmentFile=%h/nexarm-console/.env.lan
+ExecStart=%h/nexarm-console/.venv/bin/python -m nexarm.lan_control --host ${NEXARM_LAN_HOST} --peer ${NEXARM_CONTROL_PEER}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

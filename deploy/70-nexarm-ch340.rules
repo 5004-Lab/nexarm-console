@@ -1,0 +1,2 @@
+# Allow the same dialout users who access ttyUSB to initialize this CH340 UART.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523", GROUP="dialout", MODE="0660"

@@ -1,5 +1,7 @@
 # NexArm Console
 
+新版 Linux 工作台支持持久操作记录、历史轨迹回看、原生尺寸双相机预览与示教采集。使用说明见 [WORKBENCH.md](WORKBENCH.md)，Linux 部署见 [DEPLOYMENT.md](DEPLOYMENT.md)，独立抓取准备项目见 [Grasp Lab](experiments/grasp-lab/README.md)。
+
 NexArm 六舵机机械臂的浏览器工作台。机械臂和腕部 RGB 相机接到同一台电脑，由该电脑提供串口控制、运动规划、实测反馈和相机画面。浏览器提供数字孪生、XYZ 目标控制、六轴角度输入、反馈曲线和动作组编辑。
 
 ## 环境要求

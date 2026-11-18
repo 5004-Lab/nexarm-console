@@ -7,7 +7,7 @@ const messages = {
   waiting: '正在等待实时画面…',
 };
 
-export function createCamera(panel, onPose, onFrame = () => {}) {
+export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/api/camera', syncPose = true } = {}) {
   const canvas = panel.querySelector('canvas');
   const context = canvas.getContext('2d');
   const message = panel.querySelector('.camera-message');
@@ -18,6 +18,16 @@ export function createCamera(panel, onPose, onFrame = () => {}) {
   let active = true;
   let deadline = 0;
   let paired = false;
+  let lastBlob;
+  const full = panel.querySelector('[data-camera-fullscreen]');
+  const download = panel.querySelector('[data-camera-download]');
+  if (full) full.onclick = () => panel.querySelector('.camera-image').requestFullscreen();
+  if (download) download.onclick = () => {
+    if (!lastBlob) return;
+    const url = URL.createObjectURL(lastBlob);
+    Object.assign(document.createElement('a'), { href: url, download: `nexarm-${panel.id}-${Date.now()}.jpg` }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
 
   function status(label, text = '') {
     badge.textContent = label;
@@ -35,13 +45,14 @@ export function createCamera(panel, onPose, onFrame = () => {}) {
   }
 
   async function poll() {
-    let delay = 45;
+    let delay = endpoint.endsWith('external') ? 140 : 70;
     try {
-      const response = await fetch(`/api/camera?after=${capture}`, { cache: 'no-store', signal: AbortSignal.timeout(700) });
+      const response = await fetch(`${endpoint}?after=${capture}`, { cache: 'no-store', signal: AbortSignal.timeout(1500) });
       if (!active) return;
       const mode = response.headers.get('X-Camera-State');
       if (response.status === 200) {
-        const bitmap = await createImageBitmap(await response.blob());
+        lastBlob = await response.blob();
+        const bitmap = await createImageBitmap(lastBlob);
         try {
           if (!active) return;
           const pose = JSON.parse(response.headers.get('X-Camera-Pose') || 'null');
@@ -53,7 +64,7 @@ export function createCamera(panel, onPose, onFrame = () => {}) {
           }
           context.drawImage(bitmap, 0, 0);
           canvas.hidden = false;
-          paired = Array.isArray(pose) && pose.length === 6;
+          paired = syncPose && Array.isArray(pose) && pose.length === 6;
           const now = performance.now();
           presented.push(now);
           while (presented[0] < now - 1000) presented.shift();
@@ -65,7 +76,7 @@ export function createCamera(panel, onPose, onFrame = () => {}) {
           deadline = now + 480;
           if (paired) onPose(pose);
           onFrame({ stamp: capture, skew: paired ? Number(skew) : null, width: bitmap.width, height: bitmap.height, rate });
-          status(paired ? `同步 · ${skew} ms` : '实时画面 · 等待关节反馈');
+          status(paired ? `同步 · ${skew} ms` : syncPose ? '实时画面 · 等待关节反馈' : '实时画面');
         } finally {
           bitmap.close();
         }

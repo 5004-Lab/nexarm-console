@@ -14,8 +14,9 @@ from urllib.parse import unquote, urlsplit
 CONTROL_ACTIONS = frozenset({
     "arm", "disarm", "heartbeat", "read", "preview-target", "move-target",
     "move-joints", "jog", "stop", "run", "park", "capture-start", "capture-export",
+    "observation-start", "observation-stop", "observation-mark",
 })
-READ_APIS = frozenset({"/api/state", "/api/camera", "/api/logs", "/api/capture-state", "/api/capture-file", "/api/capture-library"})
+READ_APIS = frozenset({"/api/state", "/api/camera", "/api/camera/external", "/api/camera-info", "/api/history/sessions", "/api/history/samples", "/api/history/archive", "/api/logs", "/api/capture-state", "/api/capture-file", "/api/capture-library"})
 MAX_BODY = 65536
 
 
@@ -57,7 +58,7 @@ def application(host, port, peer, upstream_port, password):
             return False
 
         def relay(self, path, body=None):
-            connection = HTTPConnection("127.0.0.1", upstream_port, timeout=8)
+            connection = HTTPConnection("127.0.0.1", upstream_port, timeout=1800 if path.startswith("/api/history/archive") else 8)
             headers = {"X-Operator": self.headers.get("X-Operator", "")}
             try:
                 if body is not None:
