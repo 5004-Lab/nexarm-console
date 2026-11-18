@@ -11,40 +11,55 @@ body { background: #fff; }
 .history-toolbar label { display: flex; gap: 5px; align-items: center; }
 .history-toolbar button { min-height: 29px; font-size: 12px; }
 #history-summary { margin-left: auto; color: #536575; font-variant-numeric: tabular-nums; }
-#page-control { display: grid; grid-template-columns: minmax(310px, 340px) minmax(0, 1fr); grid-template-areas: 'heading heading' 'commands visuals' 'trends trends'; grid-template-rows: auto auto auto; min-height: 0; }
+#page-control { --stage-height: clamp(480px, calc(100dvh - 146px), 820px); --video-width: clamp(220px, calc((var(--stage-height) - 156px) * .666667), 443px); display: grid; grid-template-columns: minmax(380px, 400px) minmax(0, 1fr); grid-template-areas: 'commands visuals' 'trends trends'; grid-template-rows: auto auto; min-height: 0; }
 #page-control > .page-heading { grid-area: heading; }
-.command-column { grid-area: commands; border-right: 1px solid #bdc8d4; background: #f8fafc; min-width: 0; max-height: clamp(480px, calc(100dvh - 202px), 820px); overflow-y: auto; }
+.command-column { grid-area: commands; border-right: 1px solid #bdc8d4; background: #f8fafc; min-width: 0; max-height: var(--stage-height); overflow-y: auto; }
 .coordinate-panel .panel-header { flex-wrap: wrap; }
 .coordinate-content, .manual-form { padding: 12px; gap: 9px; }
 .manual-inputs { grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; }
 .manual-inputs input { min-height: 34px; padding: 5px; }
-.joint-monitor { border-top: 1px solid var(--line); }
-.joint-monitor table { font-size: 11px; }
-.joint-monitor td { text-align: right; font-variant-numeric: tabular-nums; }
-.joint-monitor th, .joint-monitor td { padding: 8px 7px; }
-.controller-details { margin: 0; display: grid; grid-template-columns: 1fr; padding: 7px 12px; gap: 5px; font-size: 12px; }
-.controller-details > div { display: flex; justify-content: space-between; }
-.controller-details dt { color: #607183; }
-.controller-details dd { margin: 0; }
-.visuals { grid-area: visuals; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(275px, 1fr); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 0; align-items: stretch; height: clamp(480px, calc(100dvh - 202px), 820px); }
+.visuals { grid-area: visuals; display: grid; grid-template-columns: minmax(0, 1fr) var(--video-width); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 0; align-items: stretch; height: var(--stage-height); }
 .visuals > .view-panel { grid-column: 1; grid-row: 1 / 3; display: grid; grid-template-rows: 43px minmax(0,1fr) auto; border-right: 1px solid var(--line); }
 .visuals .view-panel .visual-frame { height: 100%; min-height: 0; }
-.visuals .camera-panel { grid-column: 2; display: grid; grid-template-rows: auto minmax(0,1fr) auto; min-height: 0; }
+.visuals .camera-panel { grid-column: 2; display: grid; grid-template-rows: 41px minmax(0,1fr) 37px; min-height: 0; }
+.visuals .camera-panel h2 { font-size: 14px; }
+.visuals .camera-panel .panel-header { height: 41px; min-height: 41px; padding: 5px 8px; flex-wrap: nowrap; }
 .visuals .camera-panel + .camera-panel { border-top: 1px solid var(--line); }
 .visuals .camera-panel .visual-frame { height: 100%; min-height: 0; background: #111b26; }
 .manual-form { padding: 10px 6px; }
-.manual-form table { font-size: 11px; }
-.manual-form td { text-align: right; padding: 7px 3px; }
-.manual-form th { padding: 7px 3px; white-space: nowrap; }
-.manual-form table input { width: 61px; min-height: 30px; font-size: 11px; padding: 3px; }
+.manual-heading h3 { font-size: 17px; }
+.manual-heading span { font-size: 13px; }
+.manual-form table { font-size: 14px; }
+.manual-form td { text-align: right; padding: 9px 4px; }
+.manual-form th { padding: 9px 4px; white-space: nowrap; font-size: 13px; }
+.manual-form table input { width: 75px; min-height: 36px; font-size: 14px; padding: 5px; }
 .view-footer { padding: 6px 10px; min-height: 31px; gap: 4px 10px; flex-wrap: wrap; background: #f8fafc; }
 .view-panel .view-footer { font-size: 11px; }
 .camera-tools { display: flex; gap: 5px; margin-left: auto; }
 .camera-tools button { font-size: 11px; padding: 2px 7px; min-height: 25px; background: transparent; }
+.camera-panel .view-footer { flex-wrap: nowrap; padding: 5px 7px; gap: 5px; }
+.camera-panel .view-footer > span:first-child { display: none; }
+.camera-panel .camera-details { font-size: 11px; white-space: nowrap; }
+.camera-panel .camera-tools { gap: 3px; }
+.camera-panel .camera-tools button { padding: 2px 4px; font-size: 10px; }
 .camera-image:fullscreen { background: #080d12; width: 100vw; height: 100vh !important; }
-.analysis-layout { grid-area: trends; display: grid; grid-template-columns: minmax(0,1.8fr) minmax(310px,1fr); border-top: 1px solid #aab8c5; gap: 0; }
+.analysis-layout { grid-area: trends; display: grid; grid-template-columns: minmax(0,1fr) var(--video-width); border-top: 1px solid #aab8c5; gap: 0; }
 .analysis-layout > :first-child { border-right: 1px solid var(--line); }
-.analysis-layout .figure-surface { height: 280px; flex: auto; }
+.analysis-layout .figure-surface { height: 480px; flex: auto; }
+.analysis-layout .range-panel th, .analysis-layout .range-panel td { font-size: 12px; padding: 8px 4px; }
+.analysis-layout .range-panel th[scope=row] span { display: none; }
+.target-editor { position: absolute; z-index: 4; top: 9px; left: 9px; right: 9px; max-width: 520px; padding: 9px 11px; border: 1px solid #a9bbcc; background: rgba(255,255,255,.96); font-size: 12px; }
+.target-editor > div:first-child { display: flex; flex-wrap: wrap; gap: 5px 10px; }
+.target-editor > div:first-child span { color: #52677a; }
+#target-preview-coordinates { display: block; margin: 7px 0; font: 650 15px ui-monospace, monospace; color: #9f4c09; }
+.target-editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 6px; }
+.target-editor-actions label { display: flex; align-items: center; gap: 4px; margin-right: 6px; }
+.target-editor-actions button { min-height: 29px; padding: 3px 7px; }
+.target-editor-actions span { color: #52677a; font-size: 11px; }
+[data-target-nudge^="X"] { color: #a63931; }
+[data-target-nudge^="Y"] { color: #23754e; }
+[data-target-nudge^="Z"] { color: #006eaf; }
+.target-coordinate-label { position: absolute; z-index: 3; pointer-events: none; padding: 4px 7px; border: 1px solid #d58a42; background: #fff8ec; color: #8e4408; font: 12px ui-monospace, monospace; white-space: nowrap; }
 .section-heading { padding: 11px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #d9e0e7; background: #f5f8fb; }
 .section-heading h2 { font-size: 15px; }
 .section-heading p, .section-heading span { font-size: 12px; color: #5c6c7c; }
@@ -75,20 +90,21 @@ body { background: #fff; }
 .advanced-layout { padding: 14px 18px; gap: 18px; }
 .servo-card { border: 0; border-bottom: 1px solid var(--line); padding: 10px 8px; }
 @media(max-width:1099px) {
-  #page-control { grid-template-columns: 310px minmax(0,1fr); }
-  .visuals { grid-template-columns: 1fr; grid-template-rows: 350px 260px 260px; }
-  .visuals { height: auto; }
-  .visuals > .view-panel { grid-row: auto; grid-column: 1; border-right: 0; border-bottom: 1px solid var(--line); }
-  .visuals .view-panel .visual-frame { min-height: 0; }
-  .visuals .camera-panel { grid-column: 1; }
+  #page-control { grid-template-columns: 380px minmax(0,1fr); }
   .analysis-layout .range-panel { grid-column: auto; }
   .observation-fields { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
-@media(max-width:700px) {
+@media(max-width:900px) {
   #page-control { display: flex; flex-direction: column; }
-  .command-column { order: 2; border-right: 0; }
-  .command-column { max-height: none; }
+  .command-column { order: 2; border-right: 0; max-height: none; }
   .visuals { order: 1; }
+  .analysis-layout { order: 3; }
+}
+@media(max-width:700px) {
+  .visuals { height: auto; grid-template-columns: 1fr; grid-template-rows: 350px auto auto; }
+  .visuals > .view-panel { grid-column: 1; grid-row: 1; border-right: 0; }
+  .visuals .camera-panel { grid-column: 1; grid-template-rows: 41px auto 37px; }
+  .visuals .camera-panel .camera-image { height: auto; aspect-ratio: 4 / 3; }
   .analysis-layout { order: 3; grid-template-columns: 1fr; }
   .visual-frame { aspect-ratio: auto; }
   .geometry-grid { grid-template-columns: 1fr; }

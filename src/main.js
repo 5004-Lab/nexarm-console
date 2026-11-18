@@ -84,7 +84,6 @@ $('#app').innerHTML = `
 ${historyToolbar}
 <main class="workspace">
   <div class="work-page" id="page-control">
-  <div class="page-heading"><h1>机械臂控制</h1><span>基座坐标系 · mm / °</span></div>
   <section class="visuals" aria-label="并列监控">
     <section class="view-panel panel" aria-label="数字孪生">
       <header class="panel-header">
@@ -96,6 +95,12 @@ ${historyToolbar}
       </header>
       <div class="viewer visual-frame">
         <div id="canvas-host"></div><span id="model-note" class="model-note">正在载入 NexArm 模型</span>
+        <div class="target-editor" id="target-editor" hidden>
+          <div><strong>三维目标编辑</strong><span>拖动坐标箭头调整 XYZ，拖动空白处旋转视角</span></div>
+          <output id="target-preview-coordinates">—</output>
+          <div class="target-editor-actions"><label>步长<select id="target-snap"><option value="1">1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option></select></label>${['X','Y','Z'].map(axis => `<button type="button" data-target-nudge="${axis}:-1" aria-label="目标 ${axis} 减小">${axis}−</button><button type="button" data-target-nudge="${axis}:1" aria-label="目标 ${axis} 增大">${axis}+</button>`).join('')}</div>
+          <div class="target-editor-actions"><button type="button" id="target-confirm">确认目标并检查路径</button><button type="button" id="target-cancel">取消</button><span>选点只修改目标，执行仍需点击“移动到目标”</span></div>
+        </div>
       </div>
       <footer class="view-footer"><span><span class="legend-dot"></span> 末端 <span class="legend-dot target-dot"></span> 目标</span><span id="rate">等待六轴反馈</span></footer>
     </section>
@@ -123,7 +128,7 @@ ${historyToolbar}
         <div class="current-tcp"><span>当前末端</span><output id="tcp-reading">—</output></div>
         <form id="target-form">
           <div class="coordinates">${['X', 'Y', 'Z'].map(axis => `<label for="target-${axis}"><span>${axis}</span><input id="target-${axis}" type="number" min="${axis === 'Z' ? workcell.floor_mm + 5.1 : -workcell.max_reach_mm}" max="${workcell.max_reach_mm}" step="any" required aria-label="${axis} 目标坐标（毫米）" /></label>`).join('')}</div>
-          <div class="coordinate-actions"><button id="pick-target" type="button" aria-pressed="false" title="使用当前 Z 在模型上选 XY">图上选点</button><button id="preview-target" type="submit">检查路径</button><button id="move-target" class="primary-button" type="button" disabled>移动到目标</button></div>
+          <div class="coordinate-actions"><button id="pick-target" type="button" aria-pressed="false" title="在三维视图中调整目标 XYZ">三维选点</button><button id="preview-target" type="submit">检查路径</button><button id="move-target" class="primary-button" type="button" disabled>移动到目标</button></div>
         </form>
         <p id="plan-notice" class="plan-notice" role="status" aria-live="polite"></p>
         <p id="notice" class="notice" role="status" aria-live="polite"></p>
@@ -215,20 +220,16 @@ ${historyToolbar}
 const commandColumn = Object.assign(document.createElement('aside'), { className: 'command-column', ariaLabel: '机械臂控制台' });
 commandColumn.append($('.coordinate-panel'));
 $('#page-control').insertBefore(commandColumn, $('.visuals'));
-const jointMonitor = document.createElement('section');
-jointMonitor.className = 'joint-monitor';
-jointMonitor.innerHTML = `<header class="section-heading"><h2>六轴状态与跟踪</h2><span>实测 / 指令 / 误差</span></header><table aria-label="六轴状态与跟踪"><thead><tr><th>轴</th><th>实测 °</th><th>指令 °</th><th>误差 °</th><th>速度 °/s</th></tr></thead><tbody>${joints.map((joint,i) => `<tr data-joint-monitor="${i}"><th title="${joint.name}">J${i+1}</th><td>—</td><td>—</td><td>—</td><td>—</td></tr>`).join('')}</tbody></table><dl class="controller-details"><div><dt>供电状态</dt><dd id="controller-power">—</dd></div><div><dt>控制模式</dt><dd id="controller-mode">—</dd></div><div><dt>运动状态</dt><dd id="controller-motion">—</dd></div></dl>`;
-commandColumn.append(jointMonitor);
 const manualInputs = $('.manual-inputs');
-const jointTable = jointMonitor.querySelector('table');
-jointTable.querySelector('thead tr').innerHTML = '<th>轴</th><th>实测 °</th><th>目标 °</th><th>指令 °</th><th>误差 °</th><th>速度 °/s</th>';
+const jointTable = document.createElement('table');
+jointTable.setAttribute('aria-label', '六轴状态与跟踪');
+jointTable.innerHTML = `<thead><tr><th>轴</th><th>实测 °</th><th>目标 °</th><th>指令 °</th><th>误差 °</th><th>速度 °/s</th></tr></thead><tbody>${joints.map((joint,i) => `<tr data-joint-monitor="${i}"><th title="${joint.name}">J${i+1}</th><td>—</td><td>—</td><td>—</td><td>—</td></tr>`).join('')}</tbody>`;
 for (const row of jointTable.querySelectorAll('tbody tr')) {
   const i = Number(row.dataset.jointMonitor);
   [...row.querySelectorAll('td')].forEach((cell,index) => { cell.dataset.jointReading = index; });
   const target = row.insertCell(2); target.append($(`#manual-${i}`));
 }
 manualInputs.replaceWith(jointTable);
-jointMonitor.querySelector('.section-heading').remove();
 for (const button of document.querySelectorAll('[data-signal]')) button.onclick = () => {
   for (const figure of document.querySelectorAll('#page-telemetry .telemetry-grid [data-figure]')) figure.hidden = figure.dataset.figure !== button.dataset.signal;
   for (const peer of document.querySelectorAll('[data-signal]')) peer.setAttribute('aria-pressed', String(peer === button));
@@ -595,9 +596,6 @@ function render() {
     const values = [actual, command, actual != null && command != null ? command - actual : null, state.velocity?.[i]];
     [...row.querySelectorAll('[data-joint-reading]')].forEach(cell => { const index = Number(cell.dataset.jointReading); cell.textContent = Number.isFinite(values[index]) ? values[index].toFixed(2) : '—'; });
   }
-  $('#controller-power').textContent = state.connected ? state.power_ok ? '供电正常' : '供电待检查' : '等待反馈';
-  $('#controller-mode').textContent = state.bridge ? '电脑桥接' : '板载协议';
-  $('#controller-motion').textContent = state.moving ? state.motion_phase?.name || '正在执行' : '静止';
   const enabled = liveControl() && !busy;
   const maintenance = enabled && !state.remote_control;
   const editing = !state.task;

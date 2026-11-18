@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import URDFLoader from 'urdf-loader';
 import joints from './joints.json';
 import workcell from './workcell.json';
 import sampledReach from './reach.json';
+import { toScene, fromScene } from './target-space.js';
 
 export function createTwin(host, onLoad) {
   let renderer;
@@ -12,7 +14,7 @@ export function createTwin(host, onLoad) {
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   } catch {
     onLoad('此浏览器无法创建 WebGL 视口');
-    return { update() {}, view() {}, pick() {}, target() {}, setPath() {}, setTrace() {} };
+    return { update() {}, view() {}, pick() {}, target() {}, targetSnap() {}, setPath() {}, setTrace() {} };
   }
   renderer.setPixelRatio(Math.min(devicePixelRatio, 1.8));
   renderer.shadowMap.enabled = true;
@@ -103,7 +105,20 @@ export function createTwin(host, onLoad) {
   const targetDot = dot(0.009, 0xdd6b10);
   targetDot.visible = false;
   targetDot.renderOrder = 3;
+  targetDot.rotation.x = -Math.PI / 2;
   scene.add(targetDot);
+  const transform = new TransformControls(camera, renderer.domElement);
+  transform.setMode('translate');
+  transform.setSpace('local');
+  transform.setSize(0.75);
+  transform.setTranslationSnap(0.001);
+  scene.add(transform.getHelper());
+  let gizmoGesture = false;
+  transform.addEventListener('dragging-changed', event => {
+    controls.enabled = !event.value;
+    if (event.value) gizmoGesture = true;
+    else setTimeout(() => { gizmoGesture = false; }, 0);
+  });
   const trajectory = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x0072bd }));
   trajectory.visible = false;
   scene.add(trajectory);
@@ -115,27 +130,55 @@ export function createTwin(host, onLoad) {
   }));
   slice.visible = false;
   scene.add(slice);
-  const coordinates = ([x, y, z]) => new THREE.Vector3(x / 1000, z / 1000, -y / 1000);
+  const coordinates = point => new THREE.Vector3(...toScene(point));
+  const selectionPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 1.1), new THREE.MeshBasicMaterial({ color: 0x0072bd, opacity: 0.055, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+  selectionPlane.rotation.x = -Math.PI / 2;
+  selectionPlane.visible = false;
+  scene.add(selectionPlane);
+  const projection = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0xdd6b10, dashSize: .008, gapSize: .005 }));
+  projection.visible = false;
+  scene.add(projection);
+  const targetLabel = Object.assign(document.createElement('div'), { className: 'target-coordinate-label', hidden: true });
+  host.append(targetLabel);
   let sliceSamples = [];
   let pickHeight = 0;
   const picker = new THREE.Raycaster();
   let pickCallback;
+  function updateSelection() {
+    if (!pickCallback) return;
+    const xyz = fromScene(targetDot.position.toArray());
+    pickHeight = xyz[2];
+    selectionPlane.position.y = pickHeight / 1000;
+    const points = [targetDot.position.clone(), new THREE.Vector3(targetDot.position.x, workcell.floor_mm / 1000, targetDot.position.z)];
+    projection.geometry.dispose();
+    projection.geometry = new THREE.BufferGeometry().setFromPoints(points);
+    projection.computeLineDistances();
+    targetLabel.textContent = `X ${xyz[0].toFixed(1)} · Y ${xyz[1].toFixed(1)} · Z ${xyz[2].toFixed(1)} mm`;
+    if (Math.abs((sliceSamples[0]?.[2] ?? -1e6) - pickHeight) > 8) {
+      sliceSamples = sampledReach.filter(([, , z]) => Math.abs(z - pickHeight) <= 12);
+      slice.geometry.dispose();
+      slice.geometry = new THREE.BufferGeometry().setFromPoints(sliceSamples.map(([x,y]) => coordinates([x,y,pickHeight])));
+    }
+  }
+  transform.addEventListener('objectChange', () => {
+    if (!pickCallback) return;
+    updateSelection();
+    pickCallback([fromScene(targetDot.position.toArray())]);
+  });
   let pointerDown;
   renderer.domElement.addEventListener('pointerdown', event => {
     pointerDown = event.button === 0 ? [event.clientX, event.clientY] : null;
   });
   renderer.domElement.addEventListener('pointerup', event => {
-    if (!pickCallback || !pointerDown || Math.hypot(event.clientX - pointerDown[0], event.clientY - pointerDown[1]) > 5) return;
+    if (!pickCallback || gizmoGesture || !pointerDown || Math.hypot(event.clientX - pointerDown[0], event.clientY - pointerDown[1]) > 5) return;
     const rect = renderer.domElement.getBoundingClientRect();
     picker.setFromCamera(new THREE.Vector2(
       (event.clientX - rect.left) * 2 / rect.width - 1, 1 - (event.clientY - rect.top) * 2 / rect.height,
     ), camera);
     const point = picker.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -pickHeight / 1000), new THREE.Vector3());
     if (!point) return;
-    const xy = [Math.round(point.x * 10000) / 10, -Math.round(point.z * 10000) / 10, pickHeight];
-    const nearby = sliceSamples.map(candidate => [Math.hypot(xy[0] - candidate[0], xy[1] - candidate[1]), candidate])
-      .filter(([distance]) => distance <= 55).sort((a, b) => a[0] - b[0]).slice(0, 3);
-    pickCallback(nearby.length ? [xy, ...nearby.map(item => item[1])] : []);
+    // Use the exact selected coordinate; never replace it with a nearby sample.
+    pickCallback([fromScene(point.toArray())]);
   });
   for (const obstacle of workcell.obstacles) {
     const lower = coordinates(obstacle.min_mm);
@@ -220,6 +263,11 @@ export function createTwin(host, onLoad) {
   resize.observe(host);
   renderer.setAnimationLoop(() => {
     controls.update();
+    if (pickCallback) {
+      const projected = targetDot.position.clone().project(camera);
+      targetLabel.style.left = `${Math.max(5, Math.min(host.clientWidth - targetLabel.offsetWidth - 5, (projected.x + 1) * host.clientWidth / 2 + 14))}px`;
+      targetLabel.style.top = `${Math.max(5, Math.min(host.clientHeight - 28, (1 - projected.y) * host.clientHeight / 2 + 15))}px`;
+    }
     renderer.render(scene, camera);
   });
   return {
@@ -228,29 +276,35 @@ export function createTwin(host, onLoad) {
       applyReadings();
     },
     view,
-    pick(height, callback) {
+    pick(height, callback, initialPoint) {
       const enabled = height !== null;
       pickCallback = enabled ? callback : null;
-      controls.enableRotate = !enabled;
+      controls.enableRotate = true;
       slice.visible = enabled;
+      selectionPlane.visible = enabled;
+      projection.visible = enabled;
+      targetLabel.hidden = !enabled;
       if (enabled) {
         pickHeight = height;
-        sliceSamples = sampledReach.filter(([x, y, z]) =>
-          Math.abs(z - height) <= 18 && Math.hypot(x, y, height) <= workcell.max_reach_mm
-        ).map(([x, y]) => [x, y, height]);
-        slice.geometry.dispose();
-        slice.geometry = new THREE.BufferGeometry().setFromPoints(sliceSamples.map(coordinates));
-        controls.target.y = height / 1000;
-        camera.position.set(0, height / 1000 + 1.82, 0.001);
-        controls.update();
+        if (initialPoint) targetDot.position.copy(coordinates(initialPoint));
+        targetDot.visible = true;
+        transform.attach(targetDot);
+        updateSelection();
+      } else {
+        transform.detach();
+        controls.enabled = true;
       }
       renderer.domElement.style.cursor = enabled ? 'crosshair' : '';
       return sliceSamples.length;
     },
     target(point) {
-      targetDot.visible = point !== null;
-      if (point) targetDot.position.copy(coordinates(point));
+      targetDot.visible = point !== null || Boolean(pickCallback);
+      if (point) {
+        targetDot.position.copy(coordinates(point));
+        updateSelection();
+      }
     },
+    targetSnap(step) { transform.setTranslationSnap(step / 1000); },
     setPath(points) {
       trajectory.geometry.dispose();
       trajectory.geometry = new THREE.BufferGeometry().setFromPoints(points.map(coordinates));

@@ -5,6 +5,7 @@ export PATH="$PWD/.runtime/node/bin:$PATH"
 .venv/bin/python -m pip install -r requirements.txt
 npm ci --no-audit --no-fund
 npm run build
+npm test
 .venv/bin/python -m unittest discover -s tests -v
 systemctl --user daemon-reload
 systemctl --user restart nexarm-console.service nexarm-control.service
