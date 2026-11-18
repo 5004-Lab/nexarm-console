@@ -1,0 +1,941 @@
+"""NexArm USB controller and HTTP service for the browser console."""
+
+import argparse
+import base64
+from collections import deque
+import glob
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import json
+import math
+import os
+from pathlib import Path
+import secrets
+import struct
+import threading
+import time
+from urllib.parse import parse_qs, urlsplit
+
+import serial
+
+from . import kinematics
+from .camera_feed import CameraFeed
+
+ROOT = Path(__file__).resolve().parents[1]
+JOINTS = kinematics.JOINTS
+PREFIX = b"\xff\xff"
+VERSION, VOLTAGE, JOINT_FEEDBACK = 1, 2, 65
+GROUP_RUN, GROUP_STOP, GROUP_DOWNLOAD, GROUP_ERASE = 3, 4, 5, 23
+TORQUE, CALIBRATE, SERVO_WRITE = 61, 88, 3
+BRIDGE_MODE, BRIDGE_PARAMS, BRIDGE_READ, BRIDGE_WRITE, BRIDGE_TORQUE = 68, 56, 96, 97, 98
+ANGLE_PER_TICK = (0.87890625, 0.87890625, 0.87890625, -0.87890625, 0.87890625, 0.87890625)
+POLL_INTERVAL, FEEDBACK_TIMEOUT, LEASE_TIMEOUT = 0.085, 0.55, 1.8
+
+
+def packet(command, payload=b"", device=255):
+    body = bytes([device, len(payload) + 2, command]) + payload
+    return PREFIX + body + bytes([~sum(body) & 0xFF])
+
+
+class Frames:
+    def __init__(self):
+        self.pending = bytearray()
+
+    def feed(self, data):
+        self.pending.extend(data)
+        while self.pending:
+            start = self.pending.find(PREFIX)
+            if start < 0:
+                self.pending[:] = b"\xff" if self.pending[-1] == 255 else b""
+                return
+            del self.pending[:start]
+            if len(self.pending) < 6:
+                return
+            length = self.pending[3]
+            if not 2 <= length <= 252:
+                del self.pending[0]
+                continue
+            end = length + 4
+            if len(self.pending) < end:
+                return
+            frame = bytes(self.pending[:end])
+            if sum(frame[2:]) & 0xFF != 0xFF:
+                del self.pending[0]
+                continue
+            del self.pending[:end]
+            yield frame
+
+
+def integer(value, low, high, label):
+    if type(value) is not int or not low <= value <= high:
+        raise ValueError(f"{label}须为 {low}–{high} 的整数")
+    return value
+
+
+def time_speed(start, target, duration):
+    return max(10, min(3400, int(abs(target - start) * 1200 / duration)))
+
+
+def bridge_move(positions):
+    return packet(BRIDGE_WRITE, struct.pack("<6h", *positions))
+
+
+def download_frame(group, total, index, frame, actual):
+    servos = frame["servos"]
+    duration = frame["time"]
+    data = struct.pack("<BBBBH", group, total, index, 6, duration)
+    for device, (servo, start) in enumerate(zip(servos, actual), 1):
+        pos = servo["pos"]
+        data += struct.pack("<BHBH", device, pos, servo["acc"], time_speed(start, pos, duration))
+    return packet(GROUP_DOWNLOAD, data)
+
+
+class Controller:
+    def __init__(self, requested_port):
+        self.requested_port = requested_port
+        self.lock = threading.Lock()
+        self.closing = threading.Event()
+        self.port = None
+        self.feedback = None
+        self.last_feedback = 0
+        self.frame_times = deque(maxlen=20)
+        self.history = deque(maxlen=30)
+        self.board_stop_pending = False
+        self.read_pending = False
+        self.voltage = None
+        self.last_voltage = 0
+        self.zero_readings = 0
+        self.version = None
+        self.owner = None
+        self.lease_end = 0
+        self.limits = None
+        self.torque = [None] * 6
+        self.pending = deque()
+        self.next_packet = 0
+        self.motion = None
+        self.bridge_started = None
+        self.bridge_reference = None
+        self.bridge_ready = False
+        self.moving = set()
+        self.in_flight_until = 0
+        self.task = None
+        self.board = None
+        self.group_times = {}
+        self.group_frames = {}
+        self.result = None
+        self.log_id = 0
+        self.logs = deque(maxlen=1800)
+        self.connection_message = "正在查找 NexArm USB 串口"
+
+    def log(self, channel, text):
+        self.log_id += 1
+        self.logs.append([self.log_id, channel, time.strftime("%H:%M:%S"), text])
+
+    def message(self, text):
+        self.result = text
+        self.log("text", text)
+
+    def read_logs(self, after):
+        with self.lock:
+            if after > self.log_id:
+                after = 0
+            return {"cursor": self.log_id, "entries": [entry for entry in self.logs if entry[0] > after]}
+
+    def match_feedback(self, stamp):
+        with self.lock:
+            if not self.history or not self.feedback_ok(time.monotonic()):
+                return None
+            recorded, angles = min(self.history, key=lambda item: abs(item[0] - stamp))
+            skew = round(abs(recorded - stamp) * 1000)
+            return (skew, angles) if skew <= 140 else None
+
+    def feedback_ok(self, now):
+        return self.port is not None and self.feedback is not None and now - self.last_feedback < FEEDBACK_TIMEOUT
+
+    def power_ok(self, now):
+        return self.voltage is not None and 9 <= self.voltage <= 12.6 and (
+            self.bridge_started is not None or now - self.last_voltage < 5
+        )
+
+    def snapshot(self, client):
+        with self.lock:
+            now = time.monotonic()
+            task = self.task
+            motion = self.motion
+            return {
+                "connected": self.feedback_ok(now),
+                "port": self.port,
+                "message": self.connection_message,
+                "firmware": self.version,
+                "voltage": self.voltage,
+                "bridge": self.bridge_started is not None,
+                "power_ok": self.power_ok(now),
+                "feedback": self.feedback,
+                "angles": [kinematics.angle(i, p) for i, p in enumerate(self.positions())] if self.feedback else None,
+                "tcp": kinematics.tcp(self.positions()) if self.feedback else None,
+                "revision": self.last_feedback,
+                "hz": sum(now - t < 1 for t in self.frame_times),
+                "armed": self.owner == client and client is not None,
+                "operator_busy": self.owner is not None and self.owner != client,
+                "limits": self.limits,
+                "torque": self.torque[:],
+                "board": None if self.board is None else self.board["group"],
+                "task": None if task is None else {
+                    "mode": task["mode"], "index": task["index"], "total": len(task["frames"]),
+                    "loop": task["loop"],
+                },
+                "settling": now < self.in_flight_until,
+                "moving": motion is not None or now < self.in_flight_until,
+                "motion_phase": None if motion is None or motion["xyz"] is None else {
+                    "name": "按实测位置重新规划" if motion["replan"] else motion["phases"][motion["phase_index"]]["name"],
+                    "index": motion["phase_index"] + 1,
+                    "total": len(motion["phases"]),
+                },
+                "result": self.result,
+            }
+
+    def positions(self):
+        return [item[0] for item in self.feedback]
+
+    def plan_target(self, data):
+        xyz = data.get("xyz")
+        if not isinstance(xyz, list) or len(xyz) != 3 or any(
+            type(v) not in (int, float) or not -600 <= v <= 600 for v in xyz
+        ):
+            raise ValueError("请输入有效的 X、Y、Z（毫米）")
+        with self.lock:
+            if not self.feedback_ok(time.monotonic()):
+                raise ValueError("请先连接机械臂，读取当前姿态")
+            position = self.positions()
+        return position, kinematics.plan_cartesian(position, xyz, kinematics.joint_limits(position))
+
+    def hold(self, now):
+        self.pending.clear()
+        if self.moving and self.bridge_ready and self.feedback_ok(now):
+            self.pending.append((bridge_move(self.positions()), 0, None, None))
+        self.moving.clear()
+        self.motion = None
+        self.task = None
+        self.in_flight_until = 0
+
+    def stop(self, now, lock, text):
+        self.hold(now)
+        if lock:
+            self.owner = self.limits = None
+        self.message(text)
+
+    def frame(self, frame, bounds=None):
+        if not isinstance(frame, dict):
+            raise ValueError("动作帧格式无效")
+        duration = integer(frame.get("time"), 10, 10000, "本帧时间")
+        servos = frame.get("servos")
+        if not isinstance(servos, list) or len(servos) != 6:
+            raise ValueError("每帧需要六轴舵机位置")
+        return {"time": duration, "servos": [self.axis(i, servo, bounds) for i, servo in enumerate(servos)]}
+
+    def axis(self, index, servo, bounds=None):
+        if not isinstance(servo, dict):
+            raise ValueError("舵机参数格式无效")
+        low, high = (bounds if bounds is not None else self.limits)[index]
+        return {
+            "pos": integer(servo.get("pos"), low, high, f"ID {index + 1} 位置"),
+            "acc": integer(servo.get("acc"), 0, 255, f"ID {index + 1} Acc"),
+        }
+
+    def set_phases(self, motion, start, phases):
+        previous = start
+        steps = 0
+        for phase in phases:
+            goal = phase["positions"]
+            steps += math.ceil(max(abs(a - b) for a, b in zip(previous, goal)) / 80)
+            previous = goal
+        motion.update(phases=phases, phase_index=0, target=phases[0]["positions"], steps_left=2 * steps + 2 * len(phases) + 4)
+        motion.pop("segment_tolerance", None)
+
+    def begin_motion(self, target, duration, label, xyz=None, phases=None, held_axes=None):
+        start = self.positions()
+        bounds = kinematics.joint_limits(start)
+        stages = phases or [{"name": label, "positions": target}]
+        kinematics.check_path(start, stages[0]["positions"], bounds)
+        self.motion = {
+            "duration": duration, "label": label, "segment": None,
+            "bounds": bounds, "started": False, "torque_ready_at": None,
+            "xyz": xyz, "corrections": 0, "retries": 0, "replan": None, "replanned": False,
+            "held_axes": held_axes or {},
+        }
+        self.set_phases(self.motion, start, stages)
+        if xyz is not None:
+            self.log("text", f"第 1/{len(stages)} 段：{stages[0]['name']}")
+
+    def act(self, action, client, data):
+        if action in ("preview-target", "move-target"):
+            start, candidate = self.plan_target(data)
+            if action == "preview-target":
+                return candidate
+        if action in ("download", "board-run"):
+            with self.lock:
+                if self.owner != client or not self.feedback_ok(time.monotonic()):
+                    raise ValueError("请先启用控制并等待读取当前位置")
+                group = integer(data.get("group"), 0, 255, "组 ID")
+                start = self.positions()
+                source = data.get("frames") if action == "download" else self.group_frames.get(group)
+            if not isinstance(source, list) or not 1 <= len(source) <= 255:
+                raise ValueError("缺少可检查的动作组，请编辑并下载")
+            bounds = kinematics.joint_limits(start)
+            group_plan = [self.frame(frame, bounds) for frame in source]
+            self.check_group(start, group_plan)
+        with self.lock:
+            now = time.monotonic()
+            if action == "read":
+                if self.port is None:
+                    raise ValueError("USB 串口未连接")
+                self.read_pending = True
+                self.log("text", "读取六个舵机的实际位置")
+                return {"revision": self.last_feedback}
+            if action == "board-stop":
+                if self.port is None:
+                    raise ValueError("USB 串口未连接")
+                if self.bridge_started is not None:
+                    raise ValueError("当前在电脑控制模式，请使用主界面停止")
+                self.board_stop_pending = True
+                self.board = None
+                self.message("已请求停止板载动作")
+                return {}
+            if action in ("stop", "disarm"):
+                if self.owner not in (None, client):
+                    raise ValueError("另一个页面正在控制机械臂")
+                self.stop(now, True, "已停止电脑端动作，控制已锁定")
+                return {}
+            if action == "arm":
+                if self.owner not in (None, client):
+                    raise ValueError("另一个页面正在控制机械臂")
+                if not self.feedback_ok(now) or not self.power_ok(now):
+                    raise ValueError("请等待关节反馈和供电就绪")
+                self.owner = client
+                self.lease_end = now + LEASE_TIMEOUT
+                self.limits = kinematics.joint_limits(self.positions())
+                self.message("实时控制已启用")
+                return {}
+            if self.owner != client or now >= self.lease_end:
+                raise ValueError("请先启用控制")
+            if action == "heartbeat":
+                self.lease_end = now + LEASE_TIMEOUT
+                return {}
+            if not self.feedback_ok(now) or not self.power_ok(now):
+                raise ValueError("反馈或电压不可用")
+            if self.task or self.board is not None or self.pending or self.motion:
+                raise ValueError("请等待当前操作完成，或按停止")
+            self.limits = kinematics.joint_limits(self.positions())
+            if action == "move-target":
+                if max(abs(a - b) for a, b in zip(start, self.positions())) > 16:
+                    raise ValueError("当前姿态已变化，请重新检查目标")
+                self.begin_motion(candidate["positions"], 0, "坐标运动", data["xyz"], candidate["phases"], candidate["held_axes"])
+                self.message("坐标路径检查通过，开始运动")
+                return candidate
+            if action == "jog":
+                device = integer(data.get("device"), 1, 6, "舵机 ID")
+                requested = kinematics.position_for_angle(device - 1, data.get("angle"))
+                speed = integer(data.get("speed"), 0, 3400, "速度设置")
+                target = self.positions()
+                target[device - 1] = requested
+                duration = max(350, min(10000, int(abs(target[device - 1] - self.feedback[device - 1][0]) * 1000 / max(60, speed))))
+                self.begin_motion(target, duration, f"J{device} 单轴运动")
+                self.message(f"J{device} 已通过轨迹检查")
+                return {}
+            if action == "move-joints":
+                angles = data.get("angles")
+                if not isinstance(angles, list) or len(angles) != 6:
+                    raise ValueError("请提供六轴目标角度")
+                target = self.positions()
+                for i, value in enumerate(angles):
+                    if value is not None:
+                        target[i] = kinematics.position_for_angle(i, value)
+                self.begin_motion(target, 0, "关节运动")
+                self.message("关节路径检查通过，开始运动")
+                return {}
+            if action == "torque":
+                device = data.get("device")
+                enabled = data.get("enabled")
+                if type(enabled) is not bool:
+                    raise ValueError("无效的扭矩状态")
+                self.hold(now)
+                self.pending.clear()
+                if self.bridge_started is not None and device is not None:
+                    raise ValueError("桥接模式支持全部上电或全部掉电")
+                if device is None:
+                    command = packet(BRIDGE_TORQUE if self.bridge_ready else TORQUE, bytes([enabled]))
+                else:
+                    integer(device, 1, 6, "舵机 ID")
+                    command = packet(SERVO_WRITE, bytes([40, enabled]), device)
+                self.pending.append((command, 0, device, enabled))
+                self.message(f"{'全部舵机' if device is None else f'舵机 {device}'}{'上电' if enabled else '掉电'}请求")
+                return {}
+            if action == "calibrate":
+                if self.bridge_started is not None:
+                    raise ValueError("请重启控制台，恢复板载模式后校准")
+                if now < self.in_flight_until:
+                    raise ValueError("舵机仍在移动")
+                for device in range(1, 5):
+                    self.pending.append((packet(CALIBRATE, bytes([device])), 0.15, None, None))
+                self.message("已排队发送 ID 1–4 中位校准指令")
+                return {}
+            if action not in ("run", "download", "board-run", "erase"):
+                raise ValueError("未知操作")
+            if self.bridge_started is not None and action != "run":
+                raise ValueError("请重启控制台，恢复板载模式后操作")
+            if action in ("download", "board-run") and max(abs(a - b) for a, b in zip(start, self.positions())) > 16:
+                raise ValueError("当前位置已变化，请重新检查动作组")
+            if now < self.in_flight_until:
+                raise ValueError("请等舵机到位后再运行")
+            if action != "run":
+                group = integer(data.get("group"), 0, 255, "组 ID")
+                if action in ("board-run", "erase"):
+                    command = GROUP_RUN if action == "board-run" else GROUP_ERASE
+                    if action == "board-run":
+                        if self.group_frames.get(group) is not source:
+                            raise ValueError("板载组已变化，请重新检查")
+                        seconds = self.group_times.get(group)
+                        self.board = {"group": group, "until": now + seconds + 0.5 if seconds is not None else None}
+                        self.message(f"已请求板载运行，组 ID {group}")
+                    else:
+                        self.group_times.pop(group, None)
+                        self.group_frames.pop(group, None)
+                        self.message(f"已请求擦除板载组 ID {group}")
+                    self.pending.append((packet(command, bytes([group])), 0, None, None))
+                    return {}
+            frames = data.get("frames")
+            if not isinstance(frames, list) or not 1 <= len(frames) <= 255:
+                raise ValueError("动作组需要 1–255 帧")
+            validated = group_plan if action == "download" else [self.frame(frame) for frame in frames]
+            loops = integer(data.get("loops"), 0, 9999, "循环次数") if action == "run" else 1
+            self.task = {
+                "mode": action, "frames": validated, "index": 0, "loop": 1, "loops": loops,
+                "next_at": now, "group": group if action == "download" else None,
+                "previous": [p[0] for p in self.feedback],
+            }
+            if action == "download":
+                self.group_times.pop(group, None)
+                self.group_frames.pop(group, None)
+            self.message(f"{'电脑在线运行' if action == 'run' else f'下载至组 ID {group}'} · {len(validated)} 帧")
+            return {}
+
+    def check_group(self, actual, frames):
+        bounds = kinematics.joint_limits(actual)
+        for frame in frames:
+            target = [s["pos"] for s in frame["servos"]]
+            kinematics.check_path(actual, target, bounds)
+            actual = target
+
+    def transmit(self, link, frame):
+        link.write(frame)
+        self.log("hex", f"[TX] {frame.hex(' ').upper()}")
+
+    def update_feedback(self, joints, now):
+        if not all(0 <= p <= 4095 for p, _ in joints) or not any(p for p, _ in joints):
+            return False
+        if not self.feedback_ok(now):
+            self.log("text", "收到 NexArm 六轴实际位置")
+        self.feedback = joints
+        self.last_feedback = now
+        self.frame_times.append(now)
+        self.history.append((now, joints))
+        self.connection_message = "已收到实际关节反馈"
+        return True
+
+    def receive(self, frame, now):
+        self.log("hex", f"[RX] {frame.hex(' ').upper()}")
+        device, command, payload = frame[2], frame[4], frame[5:-1]
+        if device not in (255, 0x5A):
+            self.log("text", f"[CB] id=0x{device:02X} status=0x{command:02X} len={len(payload)}")
+            return
+        if command == JOINT_FEEDBACK and len(payload) >= 24:
+            if self.bridge_started is None:
+                self.update_feedback(list(struct.iter_unpack("<hh", payload[:24])), now)
+        elif command == BRIDGE_READ and self.bridge_reference and len(payload) == 12:
+            raw = struct.unpack("<6h", payload)
+            joints = [
+                (p, round(angle + (p - initial) * scale))
+                for p, (initial, angle), scale in zip(raw, self.bridge_reference, ANGLE_PER_TICK)
+            ]
+            if self.update_feedback(joints, now) and not self.bridge_ready:
+                self.bridge_ready = True
+                self.log("text", "已验证桥接模式下的六轴编码器反馈")
+        elif command == VOLTAGE and len(payload) >= 2:
+            voltage = struct.unpack_from("<H", payload)[0]
+            self.zero_readings = self.zero_readings + 1 if voltage == 0 else 0
+            if self.zero_readings != 1 or self.voltage is None:
+                self.voltage = voltage / 1000
+                self.last_voltage = now
+        elif command == VERSION and len(payload) >= 3:
+            self.version = {
+                "esp": ".".join(map(str, payload[:3])),
+                "at32": ".".join(map(str, payload[3:6])),
+            }
+            self.log("text", f"ESP32 {self.version['esp']} · AT32 {self.version['at32']}")
+        elif command != 11:
+            self.log("text", f"[CB] id=0x{device:02X} cmd={command} len={len(payload)}")
+
+    def tick_replan(self, motion, actual, now):
+        replan = motion["replan"]
+        if now >= replan["deadline"]:
+            self.stop(now, True, "实测姿态重规划超时，已停止")
+            return
+        if now < replan["settle"]:
+            return
+        if "start" not in replan:
+            replan["start"] = actual
+            axis = replan["axis"]
+            bounds = kinematics.lock_axes(motion["bounds"], {**motion["held_axes"], axis: actual[axis]})
+
+            def compute():
+                try:
+                    solution = kinematics.plan_cartesian(actual, motion["xyz"], bounds)
+                    answer = (solution, None)
+                except ValueError as exc:
+                    answer = (None, str(exc))
+                with self.lock:
+                    if self.motion is motion:
+                        replan["answer"] = answer
+
+            threading.Thread(target=compute, daemon=True).start()
+        if "answer" not in replan:
+            return
+        solution, error = replan["answer"]
+        axis = replan["axis"]
+        if error is not None or max(abs(a - b) for a, b in zip(actual, replan["start"])) > 10:
+            reason = error or "实测姿态仍在变化"
+            self.stop(now, True, f"J{axis + 1} 跟踪异常，无法安全绕行（{reason}），已停止")
+            return
+        phases = solution["phases"] or [{"name": "末端复核", "positions": solution["positions"]}]
+        motion["held_axes"] = solution["held_axes"]
+        self.set_phases(motion, actual, phases)
+        motion["replan"] = None
+        self.log("text", f"J{axis + 1} 保持在实测位置，从第 1/{len(phases)} 段继续")
+
+    def tick_motion(self, link, now):
+        motion = self.motion
+        if motion is None:
+            return
+        actual = self.positions()
+        if motion["replan"]:
+            self.tick_replan(motion, actual, now)
+            return
+        xyz = motion["xyz"]
+        segment = motion["segment"]
+        if segment is not None:
+            if self.last_feedback < motion["until"]:
+                return
+            deviations = [abs(a - b) for a, b in zip(actual, segment)]
+            largest = max(deviations)
+            original_errors = [abs(goal - start) for start, goal in zip(motion["segment_start"], segment)]
+            progress = all(
+                before <= 18 or after <= 5 or before - after >= max(4, before * 0.18)
+                for before, after in zip(original_errors, deviations)
+            )
+            transit = xyz is not None and segment != motion["target"]
+            tolerance = motion["segment_tolerance"]
+            if largest > tolerance and not (transit and largest <= 28 and progress):
+                for i, error in enumerate(deviations):
+                    if error <= motion["best_errors"][i] - 3:
+                        motion["best_errors"][i] = error
+                        motion["last_progress"][i] = now
+                lagging = deviations.index(largest)
+                if now <= min(motion["until"] + 2.6, motion["last_progress"][lagging] + 1.05):
+                    return
+                if xyz is not None and progress and motion["retries"] < 2 and max(
+                    before - after for before, after in zip(original_errors, deviations)
+                ) >= 5:
+                    motion["retries"] += 1
+                    self.log("text", "按最新实测关节位置重新校验剩余路径")
+                elif xyz is not None and not motion["replanned"] and 1 <= lagging <= 4 and largest <= 36 and any(
+                    before - after >= 8 for i, (before, after) in enumerate(zip(original_errors, deviations)) if i != lagging
+                ):
+                    # Hold before planning. The lagging joint stays at its measured position.
+                    self.transmit(link, bridge_move(actual))
+                    motion["segment"] = None
+                    motion["replanned"] = True
+                    motion["replan"] = {"axis": lagging, "settle": now + 0.25, "deadline": now + 5.0}
+                    self.log("text", f"J{lagging + 1} 跟踪滞后，保持当前位置并检查备用路径")
+                    return
+                else:
+                    i = deviations.index(largest)
+                    measured, expected = (kinematics.angle(i, p) for p in (actual[i], segment[i]))
+                    self.stop(now, True, f"J{i + 1} 未到位（实测 {measured:.1f}°，目标 {expected:.1f}°），已停止")
+                    return
+            motion["segment"] = None
+        delta = [b - a for a, b in zip(actual, motion["target"])]
+        distance = max(map(abs, delta))
+        tolerance = motion.get("segment_tolerance", 3)
+        next_index = motion["phase_index"] + 1
+        final_phase = next_index == len(motion["phases"])
+        error = math.dist(kinematics.tcp(actual), xyz) if xyz is not None and final_phase and distance <= tolerance else None
+        if distance <= tolerance and (error is None or error <= 3.0 or distance <= 3):
+            if next_index < len(motion["phases"]):
+                phase = motion["phases"][next_index]
+                motion["phase_index"] = next_index
+                goal = phase["positions"]
+                if phase["name"] == "底座转向":
+                    goal = [goal[0], *actual[1:]]
+                motion["target"] = goal
+                motion.pop("segment_tolerance", None)
+                self.log("text", f"第 {next_index + 1}/{len(motion['phases'])} 段：{phase['name']}")
+                return
+            title = motion["label"]
+            if error is None or error <= 3.0:
+                self.motion = None
+                self.in_flight_until = now
+                self.moving.clear()
+                self.message(f"{title}完成，末端误差 {error:.1f} mm" if error is not None else f"{title}完成，已收到实机反馈")
+                return
+            if motion["corrections"] >= 2:
+                self.stop(now, True, f"末端误差 {error:.1f} mm，已停止")
+                return
+            try:
+                bounds = kinematics.lock_axes(motion["bounds"], motion["held_axes"])
+                solution = kinematics.plan(actual, xyz, bounds)
+            except ValueError as exc:
+                self.stop(now, True, f"{exc}，末端误差 {error:.1f} mm")
+                return
+            motion["target"] = solution["positions"]
+            motion["corrections"] += 1
+            motion.pop("segment_tolerance", None)
+            delta = [b - a for a, b in zip(actual, motion["target"])]
+            distance = max(map(abs, delta))
+            if distance <= 3:
+                self.stop(now, True, f"末端误差 {error:.1f} mm，已停止")
+                return
+        if motion["steps_left"] <= 0:
+            self.stop(now, True, "无法在预定分段内到达目标，已停止")
+            return
+        if self.bridge_started is None:
+            self.transmit(link, packet(BRIDGE_MODE, b"\x01"))
+            self.bridge_started = now
+            self.bridge_reference = self.feedback[:]
+            self.log("text", "切换到 LeRobot 桥接模式")
+            return
+        if not self.bridge_ready:
+            return
+        fraction = min(1, (80 if xyz is not None else 95) / distance)
+        segment = [round(p + fraction * d) for p, d in zip(actual, delta)]
+        try:
+            kinematics.check_path(actual, segment, motion["bounds"])
+        except ValueError as exc:
+            self.stop(now, True, f"{exc}，已停止")
+            return
+        axes = [i + 1 for i, (a, b) in enumerate(zip(actual, segment)) if abs(a - b) > 4]
+        if motion["torque_ready_at"] is None or any(self.torque[i - 1] is not True for i in axes):
+            self.transmit(link, packet(BRIDGE_TORQUE, b"\x01"))
+            self.torque[:] = [True] * 6
+            motion["torque_ready_at"] = now + 0.04
+            return
+        if now < motion["torque_ready_at"]:
+            return
+        desired = motion["duration"] * fraction if motion["duration"] else distance * fraction * (8 if xyz is not None else 6)
+        speed = max(75, min(210, round(distance * fraction * 1000 / max(350, desired))))
+        self.transmit(link, packet(BRIDGE_PARAMS, struct.pack("<BH", 75, speed)))
+        self.transmit(link, bridge_move(segment))
+        duration = max(0.38, distance * fraction / speed + 0.24)
+        motion["segment"] = segment
+        motion["segment_start"] = actual
+        motion["segment_tolerance"] = max(3, min(12, round(distance * fraction * 0.16)))
+        motion["best_errors"] = [abs(a - b) for a, b in zip(actual, segment)]
+        motion["last_progress"] = [now + duration for _ in segment]
+        motion["steps_left"] -= 1
+        motion["started"] = True
+        motion["until"] = self.in_flight_until = now + duration
+        self.moving.update(axes)
+
+    def tick(self, link, now):
+        if self.board_stop_pending:
+            self.transmit(link, packet(GROUP_STOP))
+            self.board_stop_pending = False
+        entering = self.bridge_started is not None and not self.bridge_ready
+        if entering and now - self.bridge_started > 1.8:
+            raise serial.SerialException("控制器没有返回桥接编码器读数")
+        if self.owner is not None and (
+            now >= self.lease_end or (not entering and not self.feedback_ok(now)) or not self.power_ok(now)
+        ):
+            self.stop(now, True, "控制已锁定。页面心跳、关节反馈或供电中断")
+        if self.board and self.board["until"] is not None and now >= self.board["until"]:
+            self.board = None
+            self.log("text", "板载组的预计运行时间已结束")
+        if self.pending and now >= self.next_packet:
+            frame, delay, device, torque = self.pending.popleft()
+            self.transmit(link, frame)
+            self.next_packet = now + delay
+            if torque is not None:
+                if device is None:
+                    self.torque[:] = [torque] * 6
+                else:
+                    self.torque[device - 1] = torque
+        if self.pending or self.owner is None:
+            return
+        if self.motion:
+            self.tick_motion(link, now)
+            return
+        task = self.task
+        if task is None or now < task["next_at"]:
+            return
+        if task["index"] == len(task["frames"]):
+            if task["mode"] == "download":
+                self.group_times[task["group"]] = sum(f["time"] for f in task["frames"]) / 1000
+                self.group_frames[task["group"]] = task["frames"]
+                self.message(f"组 ID {task['group']} 的 {task['index']} 帧已发送。可在 HEX 日志核对通讯")
+            elif task["loops"] == 0 or task["loop"] < task["loops"]:
+                task["loop"] += 1
+                task["index"] = 0
+                return
+            else:
+                self.message("电脑在线运行结束")
+            self.task = None
+            return
+        frame = task["frames"][task["index"]]
+        task["index"] += 1
+        if task["mode"] == "download":
+            self.transmit(link, download_frame(task["group"], len(task["frames"]), task["index"], frame, task["previous"]))
+            task["previous"] = [s["pos"] for s in frame["servos"]]
+            task["next_at"] = now + 0.15
+            return
+        goal = [s["pos"] for s in frame["servos"]]
+        try:
+            self.begin_motion(goal, frame["time"], f"在线第 {task['loop']} 轮 · 第 {task['index']} 帧")
+        except ValueError as exc:
+            self.stop(now, True, f"{exc}，已停止在线运动")
+            return
+        task["next_at"] = now + frame["time"] / 1000
+
+    def run_link(self, path):
+        link = serial.Serial(baudrate=1_000_000, timeout=0.015, write_timeout=0.25, exclusive=True)
+        link.port = path
+        link.dtr = False
+        link.rts = False
+        with link:
+            print(f"USB: {path}", flush=True)
+            with self.lock:
+                self.port = path
+                self.connection_message = "等待控制器启动及关节反馈"
+                self.log("text", f"USB 串口已打开 · {path} @ 1000000")
+                self.voltage = self.version = None
+                self.zero_readings = 0
+                self.last_feedback = self.next_packet = 0
+                self.torque[:] = [None] * 6
+                self.frame_times.clear()
+                self.history.clear()
+                self.read_pending = False
+                self.bridge_started = self.bridge_reference = None
+                self.bridge_ready = False
+            parser = Frames()
+            start = time.monotonic() + 6
+            next_joint = next_voltage = next_version = start
+            while not self.closing.is_set():
+                frames = list(parser.feed(link.read(link.in_waiting or 1)))
+                now = time.monotonic()
+                with self.lock:
+                    for frame in frames:
+                        self.receive(frame, now)
+                    self.tick(link, now)
+                    if now >= next_joint or self.read_pending:
+                        self.read_pending = False
+                        read_command = JOINT_FEEDBACK if self.bridge_started is None else BRIDGE_READ
+                        self.transmit(link, packet(read_command))
+                        next_joint = now + POLL_INTERVAL
+                    if self.bridge_started is None and now >= next_voltage:
+                        self.transmit(link, packet(VOLTAGE))
+                        next_voltage = now + 0.8
+                    if self.bridge_started is None and now >= next_version and self.version is None:
+                        self.transmit(link, packet(VERSION))
+                        next_version = now + 1.2
+            if self.bridge_started is not None:
+                self.transmit(link, packet(BRIDGE_MODE, b"\x00"))
+
+    def run(self):
+        while not self.closing.is_set():
+            paths = glob.glob("/dev/cu.usbserial-*") + glob.glob("/dev/cu.wchusbserial*")
+            path = self.requested_port or (paths[0] if len(paths) == 1 else None)
+            if path is None:
+                with self.lock:
+                    self.connection_message = "请指定串口（检测到多个 USB 串口）" if paths else "等待 NexArm USB 串口"
+            elif Path(path).exists():
+                try:
+                    self.run_link(path)
+                except (OSError, serial.SerialException) as exc:
+                    print(f"USB: {exc}", flush=True)
+                    with self.lock:
+                        self.port = None
+                        self.voltage = self.version = None
+                        self.connection_message = "串口中断或被占用，正在重连"
+                        self.stop(time.monotonic(), True, "USB 通信中断，控制已锁定")
+            self.closing.wait(1.5)
+
+
+class ConsoleHTTPServer(ThreadingHTTPServer):
+    request_queue_size = 64
+
+
+def application(controller, origin, camera, view_password=None):
+    key = secrets.token_urlsafe(32)
+    viewing = view_password is not None
+    authorization = "Basic " + base64.b64encode(f"nexarm:{view_password}".encode()).decode() if viewing else ""
+
+    class Handler(SimpleHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(ROOT / "dist"), **kwargs)
+
+        def allowed_host(self):
+            return self.headers.get("Host") == origin.split("//")[1]
+
+        def allow_view(self):
+            if not self.allowed_host():
+                self.send_error(403)
+                return False
+            if viewing and not secrets.compare_digest(self.headers.get("Authorization", "").encode(), authorization.encode()):
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="NexArm LAN"')
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+            return True
+
+        def client(self):
+            value = self.headers.get("X-Operator", "")
+            return value if len(value) == 36 else None
+
+        def response(self, value, code=200):
+            body = json.dumps(value, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def camera_frame(self):
+            values = parse_qs(urlsplit(self.path).query)
+            try:
+                after = float(values.get("after", ["0"])[0])
+            except ValueError:
+                after = 0
+            status, frame = camera.frame(after)
+            self.send_response(200 if frame else 204)
+            self.send_header("X-Camera-State", status)
+            self.send_header("Cache-Control", "no-store")
+            if frame:
+                stamp, jpeg = frame
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(jpeg)))
+                self.send_header("X-Camera-Time", str(stamp))
+                sample = controller.match_feedback(stamp)
+                if sample:
+                    skew, joints = sample
+                    self.send_header("X-Pose-Skew", str(skew))
+                    self.send_header("X-Camera-Pose", json.dumps(joints, separators=(",", ":")))
+            self.end_headers()
+            if frame:
+                try:
+                    self.wfile.write(jpeg)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        def do_GET(self):
+            if not self.allow_view():
+                return
+            if urlsplit(self.path).path == "/api/camera":
+                self.camera_frame()
+            elif self.path == "/api/state":
+                state = controller.snapshot(None if viewing else self.client())
+                if viewing:
+                    state["remote_view"] = True
+                self.response(state)
+            elif urlsplit(self.path).path == "/api/logs":
+                values = parse_qs(urlsplit(self.path).query).get("after", ["0"])
+                after = int(values[0]) if values[0].isascii() and values[0].isdigit() and len(values[0]) <= 12 else 0
+                self.response(controller.read_logs(after))
+            elif self.path == "/api/session" and not viewing:
+                self.response({"key": key})
+            elif self.path.startswith("/api/"):
+                self.send_error(404)
+            else:
+                super().do_GET()
+
+        def do_HEAD(self):
+            if self.allow_view():
+                super().do_HEAD()
+
+        def do_POST(self):
+            if viewing:
+                self.close_connection = True
+                self.response({"error": "局域网页面仅供查看"}, 403)
+                return
+            client = self.client()
+            if (not self.allowed_host() or self.headers.get("Origin") != origin or client is None
+                    or not secrets.compare_digest(self.headers.get("X-Control-Key", ""), key)):
+                self.response({"error": "请在本机控制台操作"}, 403)
+                return
+            action = self.path.removeprefix("/api/")
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 65536:
+                    raise ValueError("请求大小无效")
+                data = json.loads(self.rfile.read(size))
+                if not isinstance(data, dict):
+                    raise ValueError("请求格式无效")
+                result = controller.act(action, client, data)
+            except (ValueError, UnicodeError) as exc:
+                self.response({"error": str(exc)}, 409)
+            else:
+                self.response(result)
+
+        def log_message(self, format, *args):
+            if not self.path.startswith("/api/"):
+                super().log_message(format, *args)
+
+    return Handler
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8765, help="loopback HTTP port")
+    parser.add_argument("--device", help="NexArm serial device when more than one is present")
+    parser.add_argument("--camera-device", help="Name or UID of the robot arm USB camera")
+    parser.add_argument("--lan-host", help="IPv4 address for password-protected LAN viewing")
+    args = parser.parse_args()
+    lan_password = os.environ.get("NEXARM_LAN_PASSWORD") if args.lan_host else None
+    if args.lan_host and (args.lan_host == "0.0.0.0" or not lan_password or len(lan_password) < 12):
+        parser.error("LAN viewing requires a specific interface address and NEXARM_LAN_PASSWORD (at least 12 characters)")
+    if not (ROOT / "dist/index.html").is_file():
+        parser.error("Build the browser app first with npm run build")
+    controller = Controller(args.device)
+    camera = CameraFeed(args.camera_device)
+    origin = f"http://127.0.0.1:{args.port}"
+    server = ConsoleHTTPServer(("127.0.0.1", args.port), application(controller, origin, camera))
+    lan_thread = None
+    if args.lan_host:
+        lan_origin = f"http://{args.lan_host}:{args.port}"
+        lan = ConsoleHTTPServer((args.lan_host, args.port), application(controller, lan_origin, camera, lan_password))
+        lan_thread = threading.Thread(target=lan.serve_forever, daemon=True)
+        lan_thread.start()
+        print(f"NexArm LAN view: {lan_origin}", flush=True)
+    worker = threading.Thread(target=controller.run, daemon=True)
+    camera_worker = threading.Thread(target=camera.run, daemon=True)
+    worker.start()
+    camera_worker.start()
+    print(f"NexArm Console: {origin}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        controller.closing.set()
+        if lan_thread is not None:
+            lan.shutdown()
+            lan.server_close()
+        camera.closed.set()
+        camera_worker.join(2)
+        worker.join(2)
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

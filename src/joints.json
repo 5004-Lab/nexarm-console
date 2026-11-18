@@ -1,0 +1,8 @@
+[
+  {"name":"底座旋转","joint":"joint1","zero":2048,"ticks":626.8,"sign":1,"min":739,"max":3357},
+  {"name":"肩部俯仰","joint":"joint2","zero":2048,"ticks":591.5,"sign":-1,"min":1457,"max":2976},
+  {"name":"肘部俯仰","joint":"joint3","zero":1198,"ticks":624.6,"sign":-1,"min":1011,"max":3159},
+  {"name":"腕部俯仰","joint":"joint4","zero":1200,"ticks":586.9,"sign":1,"min":813,"max":2121},
+  {"name":"腕部旋转","joint":"joint5","zero":2048,"ticks":651.9,"sign":1,"min":686,"max":3410},
+  {"name":"夹爪开合","joint":"gripper_base_joint","zero":1000,"ticks":3200,"sign":1,"min":1000,"max":2600}
+]

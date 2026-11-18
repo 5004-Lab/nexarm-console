@@ -1,0 +1,93 @@
+const messages = {
+  searching: '正在查找机械臂 USB 相机…',
+  missing: '未检测到机械臂 USB 相机',
+  permission: '请在 macOS「隐私与安全性 → 相机」允许 NexArm Camera 访问',
+  unsupported: '相机采集组件未就绪',
+  unavailable: '相机暂时无法读取，正在重试',
+  waiting: '正在等待实时画面…',
+};
+
+export function createCamera(panel, onPose) {
+  const canvas = panel.querySelector('canvas');
+  const context = canvas.getContext('2d');
+  const message = panel.querySelector('.camera-message');
+  const badge = panel.querySelector('.camera-status');
+  const details = panel.querySelector('.camera-details');
+  const presented = [];
+  let capture = 0;
+  let active = true;
+  let deadline = 0;
+  let paired = false;
+
+  function status(label, text = '') {
+    badge.textContent = label;
+    message.hidden = !text;
+    if (text) message.textContent = text;
+  }
+
+  function lost(state) {
+    paired = false;
+    deadline = 0;
+    presented.length = 0;
+    status(state === 'missing' ? '未连接' : '等待画面', messages[state] || messages.unavailable);
+    canvas.hidden = true;
+    details.hidden = true;
+  }
+
+  async function poll() {
+    let delay = 45;
+    try {
+      const response = await fetch(`/api/camera?after=${capture}`, { cache: 'no-store', signal: AbortSignal.timeout(700) });
+      if (!active) return;
+      const mode = response.headers.get('X-Camera-State');
+      if (response.status === 200) {
+        const bitmap = await createImageBitmap(await response.blob());
+        try {
+          if (!active) return;
+          const pose = JSON.parse(response.headers.get('X-Camera-Pose') || 'null');
+          const skew = response.headers.get('X-Pose-Skew');
+          capture = Number(response.headers.get('X-Camera-Time'));
+          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+          }
+          context.drawImage(bitmap, 0, 0);
+          canvas.hidden = false;
+          paired = Array.isArray(pose) && pose.length === 6;
+          const now = performance.now();
+          presented.push(now);
+          while (presented[0] < now - 1000) presented.shift();
+          const size = `${bitmap.width} × ${bitmap.height}`;
+          const elapsed = now - presented[0];
+          const rate = elapsed >= 500 ? Math.round((presented.length - 1) * 1000 / elapsed) : null;
+          details.textContent = rate === null ? size : `${size} · ${rate} fps`;
+          details.hidden = false;
+          deadline = now + 480;
+          if (paired) onPose(pose);
+          status(paired ? `同步 · ${skew} ms` : '实时画面 · 等待关节反馈');
+        } finally {
+          bitmap.close();
+        }
+      } else if (!['live', 'waiting'].includes(mode) || performance.now() > deadline) {
+        lost(mode);
+        if (mode !== 'live' && mode !== 'waiting') delay = 650;
+      }
+    } catch {
+      if (performance.now() > deadline) lost('unavailable');
+      delay = 300;
+    } finally {
+      if (active) setTimeout(poll, document.hidden ? 500 : delay);
+    }
+  }
+  function start() {
+    active = true;
+    poll();
+  }
+  window.addEventListener('pagehide', () => {
+    active = false;
+    paired = false;
+  });
+  window.addEventListener('pageshow', event => { if (event.persisted && !active) start(); });
+  poll();
+  return { paired: () => paired && performance.now() < deadline };
+}

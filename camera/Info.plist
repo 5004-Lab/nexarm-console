@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>local.nexarm.console.camera</string>
+<key>CFBundleExecutable</key><string>NexArmCamera</string>
+<key>CFBundleName</key><string>NexArm Camera</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>NSCameraUsageDescription</key><string>在本机 NexArm 控制台显示机械臂末端 USB 相机画面。</string>
+</dict></plist>

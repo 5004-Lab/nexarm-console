@@ -1,0 +1,15 @@
+/.venv/
+/node_modules/
+/dist/
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+/.camera/
+/public/model/nexarm.urdf
+/public/model/meshes/
+/.env
+/.env.*
+*.log
+.DS_Store
+/.idea/
+/.vscode/
