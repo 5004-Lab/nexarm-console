@@ -5,6 +5,7 @@ import { SVGRenderer } from 'echarts/renderers';
 import joints from './joints.json';
 import reach from './reach.json';
 import { jointAngle } from './joint-units.js';
+import { plotSamples, channelPoints, timeTooltip, readingLabel } from './telemetry-series.js';
 
 use([CustomChart, LineChart, ScatterChart, DataZoomComponent, GraphicComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapContinuousComponent, SVGRenderer]);
 
@@ -86,27 +87,8 @@ function lineDomain(figure, samples) {
 }
 
 function timeOption(figure, samples) {
-  // Retain all source samples; select per-channel extrema only for rendering long runs.
-  if (samples.length > 6000) {
-    const bucketSize = Math.ceil(samples.length / 400);
-    const selected = new Set([0, samples.length - 1]);
-    for (let start = 0; start < samples.length; start += bucketSize) {
-      const end = Math.min(samples.length, start + bucketSize);
-      selected.add(start); selected.add(end - 1);
-      for (let channel = 0; channel < figure.names.length; channel++) {
-        let low, high;
-        for (let i = start; i < end; i++) {
-          const value = samples[i].values?.[channel];
-          if (!Number.isFinite(value)) { selected.add(i); continue; }
-          if (low == null || value < samples[low].values[channel]) low = i;
-          if (high == null || value > samples[high].values[channel]) high = i;
-        }
-        if (low != null) selected.add(low);
-        if (high != null) selected.add(high);
-      }
-    }
-    samples = [...selected].sort((a,b) => a-b).map(index => samples[index]);
-  }
+  const source = samples;
+  samples = plotSamples(source, figure.names.length);
   const tail = samples.at(-1)?.stamp ?? 0;
   const origin = samples[0]?.stamp ?? tail;
   const elapsed = Math.max(1, tail - origin);
@@ -125,16 +107,15 @@ function timeOption(figure, samples) {
     graphic: { id: 'empty', type: 'text', silent: true, left: 'center', top: 'middle',
       invisible: hasData, style: { text: '等待实测数据', fill: '#5c6771', fontSize: 13, fontFamily } },
     tooltip: { ...tip, trigger: 'axis', axisPointer: { type: 'line', snap: true, lineStyle: { color: '#59646e', type: 'dashed' } },
-      valueFormatter: value => Number.isFinite(value) ? rounded(value) : '—' },
+      valueFormatter: readingLabel,
+      formatter: params => {
+        const point = Array.isArray(params) ? params[0] : params;
+        return timeTooltip(source, Number(point?.axisValue ?? point?.value?.[0]), origin, figure.names);
+      } },
     series: figure.names.map((name, i) => ({
       id: name, type: 'line', name, showSymbol: false, connectNulls: false, lineStyle: { width: 1.65 },
-      sampling: 'lttb',
       markLine: i === 0 ? { symbol: 'none', silent: true, label: { show: false }, lineStyle: { color: '#8795a6', type: 'dotted' }, data: operationEvents.slice(-40).map(event => ({ xAxis: event.stamp - origin, name: event.label })) } : undefined,
-      data: samples.flatMap((sample, index) => {
-        const t = sample.stamp - origin;
-        const point = [t, sample.values?.[i] ?? null];
-        return index && sample.stamp - samples[index - 1].stamp > 0.6 ? [[t - 0.001, null], point] : [point];
-      }),
+      data: channelPoints(samples, i, origin),
     })),
   };
 }
