@@ -218,28 +218,30 @@ body { background: #fff; }
 .episode-form label { display: grid; gap: 5px; color: #354f65; font-size: 13px; min-width: 0; }
 .episode-fields { display: flex; gap: 10px; flex-wrap: wrap; }
 .episode-fields > label { flex: 1 1 135px; }
+.episode-record-fields { display: grid; grid-template-columns: minmax(245px,2.5fr) repeat(3,minmax(105px,1fr)); gap: 8px 10px; }
 .episode-form input:not([type=checkbox]), .episode-form select { width: 100%; min-width: 0; min-height: 32px; }
 .episode-actions { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; font-size: 13px; }
-.episode-actions label { display: flex; align-items: center; gap: 4px; }
+.episode-actions label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 .episode-actions span, .episode-message { color: #52677a; }
 .episode-message { display: block; padding: 0 16px 8px; font-size: 13px; }
 .episode-message:empty { display: none; }
 #episode-library { max-width: min(65vw, 560px); min-width: 200px; }
-.episode-streams { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); border: 1px solid var(--line); background: #f6f8fa; }
-.episode-streams > div { display: flex; flex-wrap: wrap; gap: 3px 8px; padding: 6px 8px; border-right: 1px solid var(--line); }
-.episode-streams > div:last-child { border-right: 0; }
-.episode-streams strong { font-size: 12px; }
-.episode-streams span, .episode-streams output { font-size: 11px; color: #536b7d; }
-.episode-streams output { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.episode-preview { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); background: #101923; }
+.episode-preview { display: grid; grid-template-columns: repeat(4,minmax(150px,1fr)); overflow-x: auto; background: #101923; }
 .episode-preview figure { min-width: 0; margin: 0; border-right: 1px solid var(--line); }
+.episode-preview figure:last-child { border-right: 0; }
 .episode-preview figcaption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; padding: 5px 8px; background: #f4f7fa; font-size: 13px; font-weight: 600; }
-.episode-preview figcaption span { margin-left: 5px; color: #536b7d; font-size: 11px; }
+.episode-preview figcaption output { margin-left: 5px; color: #536b7d; font-size: 11px; font-variant-numeric: tabular-nums; }
 .episode-preview figcaption time { margin-left: auto; color: #354f65; font: 11px ui-monospace, monospace; }
-.episode-preview figure > div { position: relative; aspect-ratio: 4 / 3; display: grid; place-items: center; max-height: 28dvh; }
-.episode-preview canvas { width: 100%; height: 100%; position: absolute; object-fit: contain; }
+.episode-preview figure > div { position: relative; aspect-ratio: 4 / 3; display: grid; place-items: center; overflow: hidden; }
+.episode-preview canvas { display: block; width: 100%; height: 100%; position: absolute; inset: 0; object-fit: contain; object-position: center; }
 .episode-preview [data-episode-missing] { color: #e5eaf0; font-size: 12px; padding: 6px; }
 .episode-player { padding: 6px 12px; border-bottom: 1px solid var(--line); }
+#episode-mode { color: #35516a; font-weight: 650; white-space: nowrap; }
+#episode-mode[data-following=true] { color: #186142; }
+#episode-detail[data-recording=true] { display: flex; flex-direction: column; }
+#episode-detail[data-recording=true] .episode-preview figure > div { max-height: 30dvh; }
+#episode-detail[data-recording=true] .episode-segments { order: 1; }
+#episode-detail[data-recording=true] #episode-chart { height: clamp(220px, 23dvh, 340px); }
 #episode-position { min-width: 124px; font-variant-numeric: tabular-nums; }
 #episode-seek { flex: 1 1 140px; }
 .episode-segments { border-bottom: 1px solid var(--line); }
@@ -252,6 +254,9 @@ body { background: #fff; }
 .episode-band.exclude { top: 28px; border-color: #ac5c5c; background: repeating-linear-gradient(135deg,#ffe8e7,#ffe8e7 4px,#f4cac7 4px,#f4cac7 7px); color: #771d19; }
 #episode-selection { position: absolute; inset-block: 0; border: 2px solid #163f63; background: #438ac12e; pointer-events: none; }
 #episode-playhead { position: absolute; inset-block: 0; width: 2px; background: #142d44; pointer-events: none; }
+.episode-trim-mask { position: absolute; inset-block: 0; background: repeating-linear-gradient(135deg,#666e7866 0 3px,#d9e0e793 3px 7px); pointer-events: none; }
+.episode-trimming { padding: 4px 16px 9px; }
+#episode-trim-result { font-size: 12px; color: #35516a; font-variant-numeric: tabular-nums; }
 #episode-segment { padding: 6px 16px; }
 #episode-segment output { font-size: 12px; color: #35516a; font-variant-numeric: tabular-nums; }
 #episode-segment-list { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 16px 8px; }
@@ -270,9 +275,8 @@ body { background: #fff; }
 #episode-events button { text-align: left; white-space: normal; }
 #episode-review-status { font-size: 13px; color: #354f65; }
 @media(max-width: 840px) {
-  .episode-streams { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .episode-streams > div:nth-child(2) { border-right: 0; }
-  .episode-streams > div:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+  .episode-record-fields { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .episode-record-fields > :first-child { grid-column: 1 / -1; }
   .episode-analysis { grid-template-columns: 1fr; }
   .episode-analysis > :first-child { border-right: 0; }
 }

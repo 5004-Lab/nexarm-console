@@ -419,6 +419,20 @@ class Episodes:
                 "frames": rows, "annotations": events, "segments": segments,
                 "review": json.loads(entry[7]) if entry[7] else None}
 
+    def frames_after(self, identifier, after, limit):
+        History.identifier(identifier)
+        if type(after) is not int or after < -1 or type(limit) is not int or not 1 <= limit <= 250:
+            raise ValueError("帧分页参数无效")
+        with self.connect() as db:
+            db.execute("BEGIN")
+            episode = db.execute("SELECT ended FROM episodes WHERE id=?", (identifier,)).fetchone()
+            if episode is None:
+                raise ValueError("Episode 不存在")
+            rows = db.execute("SELECT payload FROM frames WHERE id=? AND frame>? ORDER BY frame LIMIT ?",
+                              (identifier, after, limit + 1)).fetchall()
+        return {"ended": episode[0], "more": len(rows) > limit,
+                "frames": [json.loads(row[0]) for row in rows[:limit]]}
+
     @staticmethod
     def segments(db, identifier):
         rows = db.execute("""SELECT s.id,s.kind,s.first,s.last,s.label,a.payload,b.payload FROM segments s
@@ -438,6 +452,7 @@ class Episodes:
             entry = db.execute("SELECT ended,review FROM episodes WHERE id=?", (identifier,)).fetchone()
             if not entry or not entry[0]:
                 raise ValueError("请先结束采集")
+            review = json.loads(entry[1]) if entry[1] else None
             old = db.execute("SELECT kind FROM segments WHERE episode=? AND id=?", (identifier, segment)).fetchone()
             if segment is not None and not old:
                 raise ValueError("片段不存在")
@@ -464,10 +479,11 @@ class Episodes:
                 db.execute("INSERT OR REPLACE INTO segments VALUES(?,?,?,?,?,?)",
                            (segment or uuid4().hex, identifier, kind, first, last, label))
                 changed_exclusions |= kind == "exclude"
-            if changed_exclusions:
-                db.execute("UPDATE episodes SET review=NULL WHERE id=?", (identifier,))
+            if changed_exclusions and review:
+                review = {"settings": review["settings"], "stale": True}
+                db.execute("UPDATE episodes SET review=? WHERE id=?", (self.dump(review), identifier))
             return {"segments": self.segments(db, identifier),
-                    "review": json.loads(entry[1]) if entry[1] and not changed_exclusions else None}
+                    "review": review}
 
     def review(self, data):
         detail = self.detail(data.get("id"))
@@ -508,7 +524,7 @@ class Episodes:
         if not detail["ended"]:
             raise ValueError("请先结束采集")
         review = detail["review"]
-        if training and (not review or not review["accepted"] or detail["result"] != "success"):
+        if training and (not review or not review.get("accepted") or detail["result"] != "success"):
             raise ValueError("训练包需要成功标注和已保存的有效清洗片段")
         directory = self.root / identifier
         metadata = detail["metadata"]
@@ -521,8 +537,19 @@ class Episodes:
         if training:
             selected = {d["frame_index"] for d in review["decisions"] if not d["reasons"]}
             rows = [row for row in detail["frames"] if row["frame_index"] in selected]
+            timestamps = {row["frame_index"]: row["timestamp"] for row in rows}
+            segments = []
+            for index, clip in enumerate(review["clips"]):
+                for segment in detail["segments"]:
+                    if segment["kind"] != "stage":
+                        continue
+                    first, last = max(segment["first"], clip["first"]), min(segment["last"], clip["last"])
+                    if first <= last:
+                        segments.append(dict(segment, first=first, last=last, clip=index,
+                                             start_timestamp=timestamps[first], end_timestamp=timestamps[last]))
         else:
             rows = detail["frames"]
+            segments = detail["segments"]
         normal = review["normalization"] if training else None
         media = {row[key] for row in rows for key in
                  ("observation.images.front", "observation.images.wrist", "observation.images.third", "observation.depth")
@@ -532,8 +559,8 @@ class Episodes:
         with ZipFile(target, "w", compression=ZIP_STORED) as output:
             output.writestr("manifest.json", self.dump(manifest))
             output.writestr("events.jsonl", "".join(self.dump(event) + "\n" for event in detail["annotations"]))
-            output.writestr("segments.jsonl", "".join(self.dump(segment) + "\n" for segment in detail["segments"]))
-            stage_by_frame = {index: s["label"] for s in detail["segments"] if s["kind"] == "stage"
+            output.writestr("segments.jsonl", "".join(self.dump(segment) + "\n" for segment in segments))
+            stage_by_frame = {index: s["label"] for s in segments if s["kind"] == "stage"
                               for index in range(s["first"], s["last"] + 1)}
             with output.open("frames.jsonl", "w", force_zip64=True) as stream:
                 for row in rows:

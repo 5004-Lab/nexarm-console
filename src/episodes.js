@@ -4,7 +4,6 @@ import { episodeChart, trajectoryNames, trajectoryValues } from './episode-chart
 const rgb = ['front', 'wrist', 'third'];
 const cameraOrder = ['front', 'depth', 'wrist', 'third'];
 const labels = {front: 'D405 RGB', depth: 'D405 深度', wrist: '腕部 RGB 相机', third: '第三人称相机', feedback: '关节反馈', action: '下发指令'};
-const channelNames = {front: 'Front', depth: 'Depth · 原始 16 位', wrist: 'Wrist', third: 'Third'};
 const results = { recording: '采集中', success: '成功', failure: '失败', unrated: '待评定', interrupted: '中断' };
 const phases = ['接近', '夹取', '提起', '搬运', '放置', '撤离'];
 const phaseColors = ['#0072BD', '#B94B14', '#8A5A04', '#7E2F8E', '#488224', '#236F88'];
@@ -16,14 +15,12 @@ const resultOptions = Object.entries(results).filter(([value]) => value !== 'rec
 export const episodePage = `<section class="episode-workbench" aria-label="多模态示教">
   <header class="section-heading"><h2>多模态示教</h2><output id="episode-status" role="status">正在连接…</output></header>
   <form id="episode-record" class="episode-form">
-    <label>任务指令<input name="task" required maxlength="240" placeholder="例如：把桌上的螺丝刀放进绿色盒子"></label>
-    <div class="episode-fields">
+    <div class="episode-record-fields">
+      <label>任务指令<input name="task" required maxlength="240" placeholder="例如：把桌上的螺丝刀放进绿色盒子"></label>
       <label>目标物体<input name="objects" maxlength="240"></label>
       <label>场景<input name="scene" maxlength="240"></label>
       <label>标定编号<input name="calibration" maxlength="240"></label>
     </div>
-    <div class="episode-streams" aria-label="固定采集通道">${cameraOrder.map(channel =>
-      `<div><strong>${labels[channel]}</strong><span>${channelNames[channel]}</span><output data-episode-count="${channel}" hidden></output></div>`).join('')}</div>
     <div class="episode-actions"><button class="primary-button" id="episode-start">开始 Episode</button>
       <button type="button" id="episode-stop" disabled>结束并保存</button>
       <label>执行结果<select id="episode-result"><option value="unrated">待评定</option><option value="success">成功</option><option value="failure">失败</option></select></label>
@@ -31,14 +28,15 @@ export const episodePage = `<section class="episode-workbench" aria-label="多�
     </div>
   </form>
   <output class="episode-message" id="episode-message" role="status"></output>
-  <header class="section-heading"><h2>Episode 回放与清洗</h2><select id="episode-library" aria-label="选择 Episode"><option value="">正在加载…</option></select></header>
+  <header class="section-heading"><h2>Episode 实时预览与回放</h2><select id="episode-library" aria-label="选择 Episode"><option value="">正在加载…</option></select></header>
   <div id="episode-detail" hidden>
     <div class="episode-preview" aria-label="同步回放画面">${cameraOrder.map(channel => `<figure data-episode-channel="${channel}">
-      <figcaption><strong data-episode-source="${channel}">${labels[channel]}</strong><span>${channelNames[channel]}</span><time data-episode-source-time="${channel}"></time></figcaption>
+      <figcaption><strong data-episode-source="${channel}">${labels[channel]}</strong><output data-episode-count="${channel}" hidden></output><time data-episode-source-time="${channel}"></time></figcaption>
       <div><canvas hidden role="img" aria-label="${labels[channel]} 回放"></canvas>
       <span data-episode-missing="${channel}">等待画面</span></div>
     </figure>`).join('')}</div>
     <div class="episode-actions episode-player">
+      <output id="episode-mode"></output><button type="button" id="episode-follow" hidden>回到实时</button>
       <button type="button" id="episode-previous" aria-label="上一帧">‹</button><button type="button" id="episode-play">播放</button>
       <button type="button" id="episode-next" aria-label="下一帧">›</button><output id="episode-position"></output>
       <input id="episode-seek" type="range" min="0" value="0" aria-label="Episode 时间轴">
@@ -48,6 +46,7 @@ export const episodePage = `<section class="episode-workbench" aria-label="多�
       <div class="episode-track-group">
         <div class="episode-track-times"><span id="episode-track-first">0.000 s</span><span id="episode-track-last"></span></div>
         <div id="episode-track" aria-label="阶段时间带"><div id="episode-bands"></div>
+          <div id="episode-trim-before" class="episode-trim-mask" hidden></div><div id="episode-trim-after" class="episode-trim-mask" hidden></div>
           <div id="episode-selection" hidden></div><i id="episode-playhead" hidden></i></div>
       </div>
       <form id="episode-segment" class="episode-actions">
@@ -62,6 +61,14 @@ export const episodePage = `<section class="episode-workbench" aria-label="多�
         <output id="episode-segment-message" role="status"></output>
       </form>
       <div id="episode-segment-list"></div>
+      <div class="episode-actions episode-trimming" id="episode-trimming" hidden>
+        <button type="button" id="episode-trim-leading" title="从当前帧开始保留">裁掉开头</button>
+        <button type="button" id="episode-trim-trailing" title="保留到当前帧为止">裁掉结尾</button>
+        <button type="button" id="episode-use-selected">保留选中区间</button>
+        <button type="button" id="episode-trim-reset">恢复整段</button>
+        <label><input id="episode-play-trimmed" type="checkbox">只播放保留范围</label>
+        <output id="episode-trim-result" role="status"></output>
+      </div>
     </section>
     <div class="episode-analysis">
       <section aria-label="实测与动作曲线">
@@ -88,7 +95,6 @@ export const episodePage = `<section class="episode-workbench" aria-label="多�
         <label>最短连续帧数<input name="min_frames" type="number" min="2" max="300" value="5" required></label></div>
       <div class="episode-actions"><label><input name="third" type="checkbox">清洗要求 Third</label>
         <label><input name="depth" type="checkbox">清洗要求 Depth</label>
-        <button type="button" id="episode-use-selected">选中片段作裁剪范围</button>
         <button class="primary-button" id="episode-prepare">清洗和计算归一化</button>
         <a id="episode-raw">下载原始包</a><a id="episode-training" hidden>下载训练包</a>
       </div>
@@ -113,11 +119,12 @@ export function createEpisodes(api, readOnly, operator) {
   const segmentForm = $('#episode-segment');
   const figures = Object.fromEntries([...document.querySelectorAll('[data-episode-channel]')].map(figure =>
     [figure.dataset.episodeChannel, {element: figure.querySelector('canvas'), message: figure.querySelector('[data-episode-missing]')}]));
-  let active, detail, selected, decisions = new Map(), position = 0;
+  let active, detail, selected, decisions = new Map(), position = -1;
   let first = null, last = null, editing = null, drag = null, framePending = false;
   let owned = sessionStorage.getItem('nexarm-episode-id');
   let loading = false, busy = false, playing = false, playGeneration = 0, timer, mediaRequest, selectionRequest;
-  let libraryVersion;
+  let libraryVersion, tailRequest, chartUpdatedAt = 0, recordRevision = 0;
+  let following = false, followDelayed = false;
   const trajectory = episodeChart($('#episode-chart'), time => jump(indexAt(time)));
 
   const pageVisible = () => !$('#page-capture').hidden && !document.hidden;
@@ -126,6 +133,30 @@ export function createEpisodes(api, readOnly, operator) {
     const response = await fetch(url, {signal, cache: 'no-store'});
     if (!response.ok) throw Error('Episode 读取失败');
     return response;
+  }
+
+  function paintMode() {
+    const recording = Boolean(detail && detail.id === selected && !detail.ended);
+    const live = following && recording;
+    $('#episode-detail').dataset.recording = String(recording);
+    const mode = $('#episode-mode');
+    mode.dataset.following = String(live);
+    mode.textContent = live ? (followDelayed ? '实时 · 等待画面更新' : '实时 · 正在录制')
+      : (recording || active ? '回放 · 录制继续' : '回放');
+    const button = $('#episode-follow');
+    button.hidden = !recording && !active;
+    button.textContent = live ? '暂停跟随' : '回到实时';
+    for (const channel of cameraOrder) {
+      const counter = $(`[data-episode-count="${channel}"]`);
+      counter.hidden = !live || active?.id !== detail?.id || !active?.media_counts;
+      if (!counter.hidden) counter.textContent = `${active.media_counts[channel]} 帧`;
+    }
+  }
+
+  function setFollowing(value) {
+    following = value;
+    followDelayed = false;
+    paintMode();
   }
 
   function status(data) {
@@ -137,29 +168,29 @@ export function createEpisodes(api, readOnly, operator) {
     $('#episode-indicator').textContent = active ? `● Episode ${active.episode_index} · ${active.samples} 帧` : '';
     $('#episode-start').disabled = readOnly() || busy || Boolean(active);
     $('#episode-stop').disabled = readOnly() || busy || !active || (!own && operator());
-    for (const channel of cameraOrder) {
-      const counter = $(`[data-episode-count="${channel}"]`);
-      counter.hidden = !active?.media_counts;
-      if (active?.media_counts) counter.textContent = `${active.media_counts[channel]} / ${active.samples} 帧`;
-    }
+    paintMode();
   }
 
   async function refresh(force = false) {
     if (loading || busy || readOnly() || (!force && !pageVisible() && !active)) return;
     loading = true;
+    const revision = recordRevision;
     try {
       const data = await (await get('/api/episodes/library')).json();
+      if (revision !== recordRevision || busy) return;
       status(data);
       if (!pageVisible()) return;
       const complete = data.episodes.filter(entry => entry.ended);
       const options = complete.map(entry => new Option(
         `#${entry.episode_index} · ${entry.metadata.reviewed_task || entry.metadata.task} · ${entry.samples} 帧 · ${results[entry.result]}`, entry.id));
+      if (active) options.unshift(new Option(`#${active.episode_index} · ${active.metadata.task} · 采集中`, active.id));
       const version = JSON.stringify(options.map(option => [option.value, option.text]));
       if (version !== libraryVersion) {
-        library.replaceChildren(new Option(options.length ? '选择已保存的 Episode' : '暂无已保存的 Episode', ''), ...options);
+        library.replaceChildren(new Option(options.length ? '选择 Episode' : '暂无 Episode', ''), ...options);
         libraryVersion = version;
       }
       library.value = selected || '';
+      if (!selected && active) void choose(active.id);
     } catch (error) {
       $('#episode-status').textContent = error.message;
     } finally { loading = false; }
@@ -192,12 +223,14 @@ export function createEpisodes(api, readOnly, operator) {
 
   function jump(index) {
     if (!detail?.frames.length) return;
+    setFollowing(false);
     pause();
     return frameAt(Math.max(0, Math.min(index, detail.frames.length - 1)));
   }
 
   async function playRange(start, end) {
     if (!detail?.frames.length) return;
+    setFollowing(false);
     pause();
     playing = true;
     const token = ++playGeneration;
@@ -232,9 +265,12 @@ export function createEpisodes(api, readOnly, operator) {
       styleBand(sliderSelection, Math.min(first ?? last, last ?? first), Math.max(first ?? last, last ?? first));
     $('#episode-bound-start').textContent = first === null ? '—' : `#${first} · ${at(timeAt(first))}`;
     $('#episode-bound-end').textContent = last === null ? '—' : `#${last} · ${at(timeAt(last))}`;
-    $('#episode-segment-start').disabled = $('#episode-segment-end').disabled = !hasFrames || framePending;
-    $('#episode-save-segment').disabled = $('#episode-exclude').disabled = !range || readOnly();
-    $('#episode-play-segment').disabled = $('#episode-use-selected').disabled = !range;
+    $('#episode-segment-start').disabled = $('#episode-segment-end').disabled = !hasFrames || position < 0 || framePending;
+    $('#episode-save-segment').disabled = $('#episode-exclude').disabled = !range || !detail?.ended || readOnly();
+    $('#episode-play-segment').disabled = !range;
+    $('#episode-use-selected').disabled = !range || !detail?.ended || readOnly();
+    const canTrim = hasFrames && position >= 0 && !framePending && Boolean(detail.ended) && !readOnly();
+    $('#episode-trim-leading').disabled = $('#episode-trim-trailing').disabled = !canTrim;
     $('#episode-segment-reset').disabled = first === null && last === null;
     $('#episode-save-segment').textContent = editing?.kind === 'stage' ? '更新阶段' : '保存阶段';
     $('#episode-exclude').textContent = editing?.kind === 'exclude' ? '更新剔除范围' : '标记剔除';
@@ -281,11 +317,8 @@ export function createEpisodes(api, readOnly, operator) {
     const result = await act('segment', {id, ...values}, '', $('#episode-segment-message'));
     if (!result || id !== selected) return;
     detail.segments = result.segments;
-    if (detail.review && !result.review) {
-      detail.review = null;
-      applyReview(null);
-      $('#episode-review-status').textContent = '剔除范围已更改，请重新清洗后导出';
-    }
+    detail.review = result.review;
+    applyReview(detail.review);
     setBounds();
     $('#episode-segment-message').textContent = values.remove ? '已删除片段' : '已保存片段';
     paintSegments();
@@ -320,7 +353,7 @@ export function createEpisodes(api, readOnly, operator) {
     const span = offsets.length >= 2 ? (Math.max(...offsets) - Math.min(...offsets)).toFixed(2) : '—';
     $('#episode-sync').textContent = `已到齐观测的时间跨度 ${span} ms`;
     $('#episode-quality').textContent = quality ? (quality.reasons.length ? quality.reasons.map(reasonText).join('、') :
-      '当前帧已纳入训练片段') : excluded ? `已标记剔除 · ${excluded.label}` : '当前帧待清洗';
+      '当前帧已纳入训练片段') : excluded ? `已标记剔除 · ${excluded.label}` : detail.ended ? '当前帧待清洗' : '保存后可清洗';
     cells($('#episode-values'), [['实测', ...trajectoryValues(row)], ['指令', ...trajectoryValues(row, true)]]);
     const playhead = $('#episode-playhead');
     playhead.hidden = false; playhead.style.left = `${trackPercent(timestamp)}%`;
@@ -335,26 +368,30 @@ export function createEpisodes(api, readOnly, operator) {
     return labels[channel];
   }
 
-  async function frameAt(index) {
+  async function frameAt(index, live = false) {
     if (!detail?.frames.length) return;
     mediaRequest?.abort();
     const controller = new AbortController();
     mediaRequest = controller;
-    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]);
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(live ? 2500 : 8000)]);
     const row = detail.frames[index];
     framePending = true;
     seek.setAttribute('aria-busy', 'true');
     paintSelection();
-    let media;
+    let media, failed = false;
     try {
       media = await Promise.all([...rgb, 'depth'].map(async channel => {
         if (!row[channel === 'depth' ? 'observation.depth' : `observation.images.${channel}`]) return null;
         try {
           const response = await get(endpoint('media', detail.id, {frame: row.frame_index, channel}), signal);
           return channel === 'depth' ? parseDepthPacket(await response.arrayBuffer()) : await createImageBitmap(await response.blob());
-        } catch { return null; }
+        } catch { failed = true; return null; }
       }));
       if (controller.signal.aborted) return;
+      if (live && failed && position >= 0) {
+        if (following) { followDelayed = true; paintMode(); }
+        return;
+      }
       for (const [i, channel] of [...rgb, 'depth'].entries()) {
         const {element, message} = figures[channel], value = media[i];
         element.hidden = !value;
@@ -371,6 +408,7 @@ export function createEpisodes(api, readOnly, operator) {
       }
       position = index; seek.value = row.frame_index;
       paintCurrent(row);
+      if (live && following) { followDelayed = failed; paintMode(); }
     } catch (error) {
       if (!controller.signal.aborted) $('#episode-message').textContent = error.message;
     } finally {
@@ -383,14 +421,60 @@ export function createEpisodes(api, readOnly, operator) {
     }
   }
 
+  function paintFrameBounds() {
+    const tail = detail.frames.at(-1);
+    seek.max = tail?.frame_index ?? 0;
+    seek.disabled = play.disabled = $('#episode-previous').disabled = $('#episode-next').disabled = !tail;
+    $('#episode-chart-export').disabled = !tail;
+    $('#episode-prepare').disabled = !tail || !detail.ended || readOnly();
+    $('#episode-track-last').textContent = at(tail?.timestamp);
+  }
+
+  async function pollTail() {
+    if (!pageVisible() || !detail || detail.ended || selected !== detail.id || tailRequest) return;
+    const current = detail;
+    const controller = new AbortController();
+    tailRequest = controller;
+    try {
+      const after = current.frames.at(-1)?.frame_index ?? -1;
+      const response = await get(endpoint('frames', current.id, {after}), AbortSignal.any([controller.signal, AbortSignal.timeout(3500)]));
+      const update = await response.json();
+      if (controller.signal.aborted || detail !== current || selected !== current.id) return;
+      current.frames.push(...update.frames);
+      if (update.frames.length) {
+        paintFrameBounds();
+        paintSelection();
+        const now = performance.now();
+        if (now - chartUpdatedAt >= 1000 || after === -1) {
+          trajectory.update(current.frames);
+          chartUpdatedAt = now;
+        }
+        if (position >= 0) $('#episode-playhead').style.left = `${trackPercent(current.frames[position].timestamp)}%`;
+      }
+      if (update.ended && !update.more) {
+        const cursor = current.frames[following ? current.frames.length - 1 : position]?.frame_index;
+        void choose(current.id, {cursor});
+        void refresh();
+        return;
+      }
+      const index = current.frames.length - 1;
+      if (following && !framePending && index >= 0 && (position !== index || followDelayed))
+        void frameAt(index, true);
+    } catch {
+      if (!controller.signal.aborted && following) { followDelayed = true; paintMode(); }
+    } finally {
+      if (tailRequest === controller) tailRequest = null;
+    }
+  }
+
   function applyReview(saved) {
-    decisions = new Map(saved?.decisions.map(item => [item.frame_index, item]) || []);
+    decisions = new Map(saved?.decisions?.map(item => [item.frame_index, item]) || []);
     const sync = saved?.sync;
-    $('#episode-review-status').textContent = saved ? `保留 ${saved.accepted} / ${saved.total} 帧 · ${saved.clips.length} 个连续片段` +
+    $('#episode-review-status').textContent = saved?.stale ? '剔除范围已更改，请重新清洗后导出' : saved ? `保留 ${saved.accepted} / ${saved.total} 帧 · ${saved.clips.length} 个连续片段` +
       (sync ? ` · 时差 P50 ${sync.p50_ms} / P95 ${sync.p95_ms} / 最大 ${sync.max_ms} ms` : '') +
       (saved.skipped_ticks ? ` · 缺采样点 ${saved.skipped_ticks}` : '') +
       (Object.keys(saved.rejected_reasons).length ? ' · ' + Object.entries(saved.rejected_reasons).map(([key, count]) => `${reasonText(key)} ${count}`).join('，') : '') : '';
-    $('#episode-next-rejected').hidden = !saved?.decisions.some(row => row.reasons.length);
+    $('#episode-next-rejected').hidden = !saved?.decisions?.some(row => row.reasons.length);
     $('#episode-training').hidden = !saved?.accepted || detail.result !== 'success';
     $('#episode-normalization').hidden = !saved?.normalization;
     if (saved?.normalization) {
@@ -400,10 +484,35 @@ export function createEpisodes(api, readOnly, operator) {
     }
   }
 
-  async function choose(id) {
+  function trimBounds() {
+    const start = detail.frames[0]?.frame_index ?? 0;
+    const end = detail.frames.at(-1)?.frame_index ?? 0;
+    const {first = start, last = end} = detail.review?.settings || {};
+    return {start, end, first, last, trimmed: first > start || last < end};
+  }
+
+  function paintTrim(enablePlayback = false) {
+    const {start, end, first, last, trimmed} = trimBounds();
+    const before = $('#episode-trim-before'), after = $('#episode-trim-after');
+    before.hidden = first <= start; after.hidden = last >= end;
+    if (!before.hidden) styleBand(before, start, first - 1);
+    if (!after.hidden) styleBand(after, last + 1, end);
+    $('#episode-trimming').hidden = !detail.ended || !detail.frames.length;
+    $('#episode-trim-reset').disabled = !trimmed || readOnly();
+    $('#episode-play-trimmed').disabled = !trimmed;
+    if (enablePlayback || !trimmed) $('#episode-play-trimmed').checked = trimmed;
+    $('#episode-trim-result').textContent = trimmed
+      ? `保留 ${at(timeAt(first))} – ${at(timeAt(last))} · 帧 ${first}–${last}`
+      : '';
+  }
+
+  async function choose(id, {cursor} = {}) {
     pause(); mediaRequest?.abort(); selectionRequest?.abort();
+    tailRequest?.abort(); tailRequest = null;
     mediaRequest = null; framePending = false;
-    selected = id;
+    detail = null; selected = id;
+    setFollowing(false);
+    if ([...library.options].some(option => option.value === id)) library.value = id;
     $('#episode-detail').hidden = true;
     if (!id) return;
     for (const {element, message} of Object.values(figures)) {
@@ -423,7 +532,8 @@ export function createEpisodes(api, readOnly, operator) {
       if (controller.signal.aborted) return;
       detail = nextDetail;
       detail.segments ??= [];
-      position = 0;
+      position = -1;
+      setFollowing(!detail.ended);
       const last = detail.frames.at(-1)?.frame_index ?? 0;
       const settings = {first: 0, last, max_skew_ms: 45, max_age_ms: 120,
         min_depth_percent: 1, min_frames: 5, third: true, depth: true, ...detail.review?.settings};
@@ -434,10 +544,8 @@ export function createEpisodes(api, readOnly, operator) {
       }
       review.elements.task.value = detail.metadata.reviewed_task || detail.metadata.task;
       review.elements.result.value = detail.result;
-      seek.max = last;
-      seek.disabled = play.disabled = $('#episode-previous').disabled = $('#episode-next').disabled = !detail.frames.length;
-      $('#episode-chart-export').disabled = !detail.frames.length;
-      $('#episode-prepare').disabled = !detail.frames.length || readOnly();
+      paintFrameBounds();
+      review.hidden = !detail.ended;
       $('#episode-raw').href = endpoint('archive', id, {format: 'raw'});
       $('#episode-training').href = endpoint('archive', id, {format: 'training'});
       for (const channel of cameraOrder) {
@@ -456,10 +564,14 @@ export function createEpisodes(api, readOnly, operator) {
       applyReview(detail.review);
       setBounds();
       paintSegments();
+      paintTrim(true);
       $('#episode-detail').hidden = false;
       trajectory.load(detail.frames);
-      if (detail.frames.length) await frameAt(0);
-      else $('#episode-position').textContent = '该 Episode 没有保存帧';
+      chartUpdatedAt = performance.now();
+      if (detail.frames.length) {
+        const initial = following ? detail.frames.length - 1 : cursor == null ? 0 : framePosition(cursor);
+        await frameAt(initial, following);
+      } else $('#episode-position').textContent = following ? '等待首帧写入…' : '该 Episode 没有保存帧';
     } catch (error) {
       if (!controller.signal.aborted) $('#episode-message').textContent = error.message;
     }
@@ -478,37 +590,65 @@ export function createEpisodes(api, readOnly, operator) {
 
   record.onsubmit = async event => {
     event.preventDefault();
+    recordRevision++;
     const result = await act('start', Object.fromEntries(new FormData(record)), '已开始记录，可进入机械臂控制进行示教');
-    if (result?.active) { owned = result.active.id; sessionStorage.setItem('nexarm-episode-id', owned); status(result); }
+    if (result?.active) {
+      owned = result.active.id; sessionStorage.setItem('nexarm-episode-id', owned); status(result);
+      void choose(owned);
+    }
     refresh();
   };
   $('#episode-stop').onclick = async () => {
     if (!active) return;
+    recordRevision++;
     const result = await act('stop', {id: active.id, result: $('#episode-result').value}, 'Episode 已保存');
     if (result?.id) {
-      active = null; owned = null; sessionStorage.removeItem('nexarm-episode-id');
-      const pending = choose(result.id); await refresh(); await pending;
+      const cursor = detail?.id === result.id ? detail.frames[position]?.frame_index : undefined;
+      owned = null; sessionStorage.removeItem('nexarm-episode-id'); status({active: null});
+      const pending = choose(result.id, {cursor}); await refresh(); await pending;
     }
   };
-  review.onsubmit = async event => {
-    event.preventDefault();
+  async function saveReview(message) {
+    if (!detail?.ended || !review.reportValidity()) return false;
     const id = selected, data = Object.fromEntries(new FormData(review));
     for (const key of ['first', 'last', 'max_skew_ms', 'max_age_ms', 'min_depth_percent', 'min_frames']) data[key] = Number(data[key]);
     for (const key of ['third', 'depth']) data[key] = review.elements[key].checked;
-    const saved = await act('review', {id, ...data}, '已保存任务、结果和清洗设置');
+    const saved = await act('review', {id, ...data}, message);
     if (saved && id === selected) {
-      detail.result = data.result; detail.review = saved; applyReview(saved); paintCurrent(detail.frames[position]); refresh();
+      detail.result = data.result;
+      detail.metadata.reviewed_task = data.task;
+      detail.review = saved;
+      applyReview(saved); paintTrim(); paintCurrent(detail.frames[position]); refresh();
+      return true;
     }
+    return false;
+  }
+  review.onsubmit = event => {
+    event.preventDefault();
+    void saveReview('已保存任务、结果和清洗设置');
   };
   review.oninput = () => { $('#episode-training').hidden = true; };
   library.onchange = () => choose(library.value);
+  $('#episode-follow').onclick = () => {
+    if (following) {
+      setFollowing(false);
+      mediaRequest?.abort();
+    } else if (detail && !detail.ended) {
+      pause(); setFollowing(true);
+      if (detail.frames.length) void frameAt(detail.frames.length - 1, true);
+    } else if (active) void choose(active.id);
+  };
   seek.oninput = () => jump(framePosition(Number(seek.value)));
   $('#episode-previous').onclick = () => jump(position - 1);
   $('#episode-next').onclick = () => jump(position + 1);
   play.onclick = () => {
     if (playing) { pause(); return; }
-    const end = detail.frames.length - 1;
-    playRange(position === end ? 0 : position + 1, end);
+    const bounds = trimBounds();
+    const trimmed = $('#episode-play-trimmed').checked && bounds.trimmed;
+    const start = trimmed ? detail.frames.findIndex(row => row.frame_index >= bounds.first) : 0;
+    const end = trimmed ? detail.frames.findLastIndex(row => row.frame_index <= bounds.last) : detail.frames.length - 1;
+    if (start < 0 || end < start) return;
+    playRange(position < start || position >= end ? start : position + 1, end);
   };
   $('#episode-show-command').onchange = event => trajectory.commands(event.target.checked);
   $('#episode-chart-export').onclick = () => trajectory.download(detail.episode_index);
@@ -520,6 +660,7 @@ export function createEpisodes(api, readOnly, operator) {
   };
 
   function selectBoundary(start) {
+    if (position < 0) return;
     pause();
     const current = detail.frames[position].frame_index;
     if (start) first = current;
@@ -530,11 +671,24 @@ export function createEpisodes(api, readOnly, operator) {
   $('#episode-segment-end').onclick = () => selectBoundary(false);
   $('#episode-segment-reset').onclick = () => setBounds();
   $('#episode-play-segment').onclick = () => playRange(framePosition(first), framePosition(last));
-  $('#episode-use-selected').onclick = () => {
-    review.elements.first.value = first;
-    review.elements.last.value = last;
-    review.oninput();
-  };
+  async function applyTrim(start, end) {
+    if (start > end) {
+      $('#episode-trim-result').textContent = '起点必须早于或等于终点';
+      return;
+    }
+    pause();
+    review.elements.first.value = start;
+    review.elements.last.value = end;
+    if (await saveReview('已保存裁剪范围并重新清洗')) {
+      paintTrim(true);
+      const current = detail.frames[position]?.frame_index;
+      if (current < start || current > end) jump(framePosition(start));
+    }
+  }
+  $('#episode-use-selected').onclick = () => applyTrim(first, last);
+  $('#episode-trim-leading').onclick = () => applyTrim(detail.frames[position].frame_index, trimBounds().last);
+  $('#episode-trim-trailing').onclick = () => applyTrim(trimBounds().first, detail.frames[position].frame_index);
+  $('#episode-trim-reset').onclick = () => { const {start, end} = trimBounds(); return applyTrim(start, end); };
   segmentForm.onsubmit = event => {
     event.preventDefault();
     const phase = segmentForm.elements.phase.value;
@@ -568,5 +722,6 @@ export function createEpisodes(api, readOnly, operator) {
   };
   track.onpointercancel = () => { drag = null; };
   setInterval(refresh, 1500);
+  setInterval(pollTail, 200);
   return {refresh, pause};
 }

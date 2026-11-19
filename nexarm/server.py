@@ -1041,6 +1041,10 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
                     self.response(episodes.library())
                 elif path == "/api/episodes/detail":
                     self.response(episodes.detail(identifier))
+                elif path == "/api/episodes/frames":
+                    after = int(params.get("after", ["-1"])[0])
+                    limit = int(params.get("limit", ["100"])[0])
+                    self.response(episodes.frames_after(identifier, after, limit))
                 elif path == "/api/episodes/media":
                     channel = params.get("channel", [""])[0]
                     file = episodes.media(identifier, int(params.get("frame", ["-1"])[0]), channel)

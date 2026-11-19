@@ -100,8 +100,16 @@ class EpisodeTests(unittest.TestCase):
                 arm.history.append((tick - .02, [(p, 0) for p in joints]))
                 store.capture(current, index, tick)
             self.assertEqual(store.status()["active"]["media_counts"], {"front": 5, "wrist": 5, "third": 5, "depth": 5})
+            batch = store.frames_after(identifier, 1, 2)
+            self.assertIsNone(batch["ended"])
+            self.assertTrue(batch["more"])
+            self.assertEqual([row["frame_index"] for row in batch["frames"]], [2, 3])
             store.mark("operator", {"id": identifier, "label": "放置"})
             store.stop("operator", {"id": identifier, "result": "success"})
+            tail = store.frames_after(identifier, 3, 2)
+            self.assertTrue(tail["ended"])
+            self.assertFalse(tail["more"])
+            self.assertEqual([row["frame_index"] for row in tail["frames"]], [4])
             detail = store.detail(identifier)
             self.assertIsNone(detail["frames"][0]["action"])
             self.assertEqual(detail["frames"][4]["action"], vector(joints))
@@ -115,10 +123,10 @@ class EpisodeTests(unittest.TestCase):
                                    "first": 0, "last": 4, "max_skew_ms": 100, "min_frames": 2,
                                    "third": True, "depth": True})
             self.assertEqual(report["accepted"], 4)
-            segment_data = {"id": identifier, "kind": "stage", "first": 1, "last": 3, "label": "接近"}
+            segment_data = {"id": identifier, "kind": "stage", "first": 0, "last": 3, "label": "接近"}
             saved = store.edit_segment(segment_data)
             segment = saved["segments"][0]
-            self.assertEqual(segment["start_timestamp"], .2)
+            self.assertEqual(segment["start_timestamp"], 0)
             self.assertEqual(segment["end_timestamp"], .6)
             with self.assertRaisesRegex(ValueError, "重叠"):
                 store.edit_segment({**segment_data, "first": 3, "last": 4, "label": "夹取"})
@@ -132,7 +140,10 @@ class EpisodeTests(unittest.TestCase):
                 self.assertEqual([row["frame_index"] for row in rows], [1, 2, 3, 4])
                 self.assertEqual(rows[0]["task"], "Place the cube")
                 self.assertEqual([row["stage"] for row in rows], ["搬运", "搬运", "搬运", None])
-                self.assertEqual(json.loads(archive.read("segments.jsonl"))["label"], "搬运")
+                exported_segment = json.loads(archive.read("segments.jsonl"))
+                self.assertEqual(exported_segment["label"], "搬运")
+                self.assertEqual(exported_segment["first"], 1)
+                self.assertEqual(exported_segment["start_timestamp"], .2)
                 self.assertEqual(rows[0]["action.normalized"], [0] * 6)
                 self.assertEqual([archive.read(rows[0][f"observation.images.{key}"]) for key in ("front", "wrist", "third")],
                                  [b"d405 rgb", b"wrist", b"third"])
@@ -145,7 +156,9 @@ class EpisodeTests(unittest.TestCase):
             self.assertEqual(restarted.library()["episodes"][0]["episode_index"], 0)
             self.assertEqual(restarted.detail(identifier)["segments"][0]["label"], "搬运")
             restarted.edit_segment({**segment_data, "kind": "exclude", "first": 2, "last": 2})
-            self.assertIsNone(restarted.detail(identifier)["review"])
+            invalidated = restarted.detail(identifier)["review"]
+            self.assertTrue(invalidated["stale"])
+            self.assertEqual(invalidated["settings"], report["settings"])
             with self.assertRaisesRegex(ValueError, "清洗片段"):
                 restarted.archive(identifier, True, io.BytesIO())
 

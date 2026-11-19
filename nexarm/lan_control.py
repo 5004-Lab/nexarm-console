@@ -18,7 +18,7 @@ CONTROL_ACTIONS = frozenset({
     "episode-start", "episode-stop", "episode-mark", "episode-review", "episode-segment",
 })
 READ_APIS = frozenset({"/api/state", "/api/camera", "/api/camera/external", "/api/camera/realsense", "/api/camera-info", "/api/depth", "/api/depth-info", "/api/history/sessions", "/api/history/samples", "/api/history/archive", "/api/logs", "/api/capture-state", "/api/capture-file", "/api/capture-library"})
-READ_APIS |= frozenset(f"/api/episodes/{name}" for name in ("library", "detail", "media", "archive"))
+READ_APIS |= frozenset(f"/api/episodes/{name}" for name in ("library", "detail", "frames", "media", "archive"))
 MAX_BODY = 65536
 
 

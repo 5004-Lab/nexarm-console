@@ -92,6 +92,7 @@ export function episodeChart(host, seek) {
       if (!frames.length) { figure?.clear(); return; }
       render(true);
     },
+    update(rows) { frames = rows; render(); },
     position(value) { cursorTime = value; cursor(); },
     commands(show) { showCommands = show; render(); },
     download(index) {
