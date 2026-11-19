@@ -3,6 +3,7 @@ import './workbench.css';
 import joints from './joints.json';
 import { createTwin } from './twin.js';
 import { createCamera } from './camera.js';
+import { createDepth, depthPanel } from './depth.js';
 import { createWorkspace } from './workspace.js';
 import { chart, createTelemetry, jointRangeTable } from './telemetry.js';
 import { capturePage, createCapture } from './capture.js';
@@ -220,6 +221,16 @@ ${historyToolbar}
 const commandColumn = Object.assign(document.createElement('aside'), { className: 'command-column', ariaLabel: '机械臂控制台' });
 commandColumn.append($('.coordinate-panel'));
 $('#page-control').insertBefore(commandColumn, $('.visuals'));
+const sensorDock = Object.assign(document.createElement('aside'), { className: 'sensor-dock', ariaLabel: '深度与彩色相机监控' });
+sensorDock.innerHTML = `${depthPanel}<nav class="rgb-tabs" aria-label="彩色参考视角"><span>彩色参考</span><button type="button" data-rgb-view="external" aria-pressed="true">第三人称</button><button type="button" data-rgb-view="wrist" aria-pressed="false">腕部</button></nav><div class="rgb-views"></div>`;
+sensorDock.querySelector('.rgb-views').append($('#external-camera'), $('#wrist-camera'));
+$('.visuals').append(sensorDock);
+$('#wrist-camera').hidden = true;
+for (const button of sensorDock.querySelectorAll('[data-rgb-view]')) button.onclick = () => {
+  for (const peer of sensorDock.querySelectorAll('[data-rgb-view]')) peer.setAttribute('aria-pressed', String(peer === button));
+  $('#external-camera').hidden = button.dataset.rgbView !== 'external';
+  $('#wrist-camera').hidden = button.dataset.rgbView !== 'wrist';
+};
 const manualInputs = $('.manual-inputs');
 const jointTable = document.createElement('table');
 jointTable.setAttribute('aria-label', '六轴状态与跟踪');
@@ -257,6 +268,7 @@ const camera = createCamera($('#wrist-camera'), feedback => twin.update(feedback
   capture.frame(frame);
 });
 createCamera($('#external-camera'), () => {}, () => {}, { endpoint: '/api/camera/external', syncPose: false });
+createDepth($('#depth-camera'));
 const workspace = createWorkspace(twin, api, () => state, () => liveControl() && !busy);
 
 function showPage() {

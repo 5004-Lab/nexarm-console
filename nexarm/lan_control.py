@@ -16,7 +16,7 @@ CONTROL_ACTIONS = frozenset({
     "move-joints", "jog", "stop", "run", "park", "capture-start", "capture-export",
     "observation-start", "observation-stop", "observation-mark",
 })
-READ_APIS = frozenset({"/api/state", "/api/camera", "/api/camera/external", "/api/camera-info", "/api/history/sessions", "/api/history/samples", "/api/history/archive", "/api/logs", "/api/capture-state", "/api/capture-file", "/api/capture-library"})
+READ_APIS = frozenset({"/api/state", "/api/camera", "/api/camera/external", "/api/camera-info", "/api/depth", "/api/depth-info", "/api/history/sessions", "/api/history/samples", "/api/history/archive", "/api/logs", "/api/capture-state", "/api/capture-file", "/api/capture-library"})
 MAX_BODY = 65536
 
 
@@ -80,7 +80,7 @@ def application(host, port, peer, upstream_port, password):
                 self.send_response(upstream.status)
                 for name, value in upstream.getheaders():
                     if name.lower() in {
-                        "content-type", "content-length", "cache-control", "last-modified", "content-disposition",
+                        "content-type", "content-length", "content-encoding", "cache-control", "last-modified", "content-disposition",
                         "x-camera-state", "x-camera-time", "x-pose-skew", "x-camera-pose",
                     }:
                         self.send_header(name, value)

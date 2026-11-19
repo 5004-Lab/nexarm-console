@@ -1,5 +1,7 @@
 """Verify independent camera routing and the authenticated LAN relay."""
 import base64
+import gzip
+import json
 from contextlib import closing
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler
@@ -17,12 +19,15 @@ class CameraHTTPTest(unittest.TestCase):
         self.controller = SimpleNamespace(match_feedback=lambda stamp: (3, [[2048, 0]] * 6))
         self.wrist = SimpleNamespace(frame=lambda after: ("live", (10.0, b"wrist-jpeg")))
         self.external = SimpleNamespace(frame=lambda after: ("live", (20.0, b"external-jpeg")))
+        self.depth_body = gzip.compress(b"native-z16-depth")
+        self.depth = SimpleNamespace(frame=lambda after: ("live", (30.0, self.depth_body)),
+                                     info=lambda: {"status": "live", "depth_scale_m": .0001})
 
     def server(self, external=True, password=None):
         server = ConsoleHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
         server.RequestHandlerClass = application(
             self.controller, f"http://127.0.0.1:{server.server_port}", self.wrist,
-            view_password=password, external_camera=self.external if external else None)
+            view_password=password, external_camera=self.external if external else None, depth_camera=self.depth)
         return self.start(server)
 
     def start(self, server):
@@ -81,6 +86,29 @@ class CameraHTTPTest(unittest.TestCase):
         authorization = "Basic " + base64.b64encode(b"nexarm:test-password-long").decode()
         response = self.get(gateway, "/api/camera/external?after=0", {"Authorization": authorization})
         self.assertEqual((response[0], response[2]), (200, b"external-jpeg"))
+
+    def test_depth_requires_auth_and_gateway_preserves_compression(self):
+        secured = self.server(password="test-password-long")
+        self.assertEqual(self.get(secured, "/api/depth")[0], 401)
+        upstream = self.server()
+        gateway = GatewayServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        gateway.RequestHandlerClass = gateway_application(
+            "127.0.0.1", gateway.server_port, "127.0.0.1", upstream.server_port, "test-password-long")
+        self.start(gateway)
+        authorization = "Basic " + base64.b64encode(b"nexarm:test-password-long").decode()
+        response = self.get(gateway, "/api/depth?after=0", {"Authorization": authorization})
+        self.assertEqual(response[0], 200)
+        self.assertEqual(response[1]["Content-Encoding"], "gzip")
+        self.assertEqual(gzip.decompress(response[2]), b"native-z16-depth")
+        info = self.get(gateway, "/api/depth-info", {"Authorization": authorization})
+        self.assertEqual(json.loads(info[2])["depth_scale_m"], .0001)
+
+    def test_depth_offline_and_bad_timestamp_do_not_affect_rgb(self):
+        self.depth.frame = lambda after: ("missing", None)
+        server = self.server()
+        self.assertEqual(self.get(server, "/api/depth")[0], 204)
+        self.assertEqual(self.get(server, "/api/depth?after=nan")[0], 400)
+        self.assertEqual(self.get(server, "/api/camera/external")[0], 200)
 
 
 if __name__ == "__main__":
