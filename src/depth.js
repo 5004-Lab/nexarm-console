@@ -12,7 +12,7 @@ export const depthPanel = `
 
 export function createDepth(panel) {
   const $ = selector => panel.querySelector(selector);
-  const canvas = $('canvas'), context = canvas.getContext('2d');
+  const canvas = $('.depth-image canvas'), context = canvas.getContext('2d');
   const image = $('.depth-image'), message = $('.camera-message'), badge = $('.depth-state');
   const freeze = $('#depth-freeze'), download = $('#depth-download');
   let frame = null, after = 0, active = true, frozen = false, pinned = false, pixel = null, background = null;

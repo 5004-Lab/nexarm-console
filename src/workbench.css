@@ -11,7 +11,7 @@ body { background: #fff; }
 .history-toolbar label { display: flex; gap: 5px; align-items: center; }
 .history-toolbar button { min-height: 29px; font-size: 12px; }
 #history-summary { margin-left: auto; color: #536575; font-variant-numeric: tabular-nums; }
-#page-control { --stage-height: clamp(660px, calc(100dvh - 146px), 820px); --video-width: clamp(253px, calc((var(--stage-height) - 280px) * .666667), 360px); display: grid; grid-template-columns: minmax(380px, 400px) minmax(0, 1fr); grid-template-areas: 'commands visuals' 'trends trends'; grid-template-rows: auto auto; min-height: 0; }
+#page-control { --stage-height: clamp(660px, calc(100dvh - 146px), 820px); --video-width: clamp(560px, calc((var(--stage-height) - 216px) * 1.333333), 800px); display: grid; grid-template-columns: minmax(380px, 400px) minmax(0, 1fr); grid-template-areas: 'commands visuals' 'trends trends'; grid-template-rows: auto auto; min-height: 0; }
 #page-control > .page-heading { grid-area: heading; }
 .command-column { grid-area: commands; border-right: 1px solid #bdc8d4; background: #f8fafc; min-width: 0; max-height: var(--stage-height); overflow-y: auto; }
 .coordinate-panel .panel-header { flex-wrap: wrap; }
@@ -89,15 +89,18 @@ body { background: #fff; }
 .capture-grid > section:first-child, #page-capture .chart-grid > :first-child { border-right: 1px solid var(--line); }
 .advanced-layout { padding: 14px 18px; gap: 18px; }
 .servo-card { border: 0; border-bottom: 1px solid var(--line); padding: 10px 8px; }
-.sensor-dock { grid-column: 2; grid-row: 1 / 3; display: grid; grid-template-rows: calc((100% - 34px) / 2 + 45px) 34px minmax(0,1fr); min-width: 0; min-height: 0; background: #f8fafc; }
-.rgb-tabs { display: flex; align-items: center; gap: 4px; padding: 2px 7px; border-block: 1px solid var(--line); font-size: 12px; background: #e9eef3; }
-.rgb-tabs span { margin-right: auto; color: #4b6376; }
-.rgb-tabs button { min-height: 27px; padding: 2px 8px; font-size: 12px; background: transparent; border-color: transparent; }
-.rgb-tabs button[aria-pressed=true] { background: white; color: #185883; border-color: #91a8b9; }
-.rgb-views { display: grid; min-height: 0; min-width: 0; }
-.sensor-dock .camera-panel { grid-column: 1; grid-row: 1; }
+.sensor-dock { grid-column: 2; grid-row: 1 / 3; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(2,minmax(0,1fr)) 60px; grid-template-areas: 'rgb depth' 'wrist external' 'tools tools'; min-width: 0; min-height: 0; background: #f8fafc; }
+.sensor-dock #realsense-camera { grid-area: rgb; }
+.sensor-dock #depth-camera { grid-area: depth; }
+.sensor-dock #wrist-camera { grid-area: wrist; }
+.sensor-dock #external-camera { grid-area: external; }
+.sensor-dock .camera-panel { grid-template-rows: 41px minmax(0,1fr) 37px; }
 .sensor-dock .camera-panel + .camera-panel { border-top: 0; }
-.depth-panel { display: grid; grid-template-rows: 41px minmax(0,1fr) 47px 46px 34px; min-height: 0; }
+.sensor-dock #wrist-camera, .sensor-dock #external-camera { border-top: 1px solid var(--line); }
+.sensor-dock #realsense-camera, .sensor-dock #wrist-camera { border-right: 1px solid var(--line); }
+.depth-controls { grid-area: tools; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; border-top: 1px solid var(--line); align-items: center; padding: 0 4px; }
+.depth-controls .depth-readout { border-top: 0; }
+.depth-panel { display: grid; grid-template-rows: 41px minmax(0,1fr) 37px; min-height: 0; }
 .depth-panel .panel-header { height: 41px; padding: 5px 8px; }
 .depth-panel h2 { font-size: 14px; }
 .depth-panel .views { gap: 4px; }
@@ -127,6 +130,16 @@ body { background: #fff; }
 .depth-footer .camera-tools { gap: 3px; }
 .depth-footer .camera-tools button { font-size: 10px; padding: 2px 4px; white-space: nowrap; }
 .depth-footer > span { min-width: 0; }
+@media(max-width:1699px) and (min-width:701px) {
+  #page-control { --video-width: 50vw; --stage-height: calc(var(--video-width) * .75 + 216px); display: flex; flex-direction: column; }
+  .command-column { order: 2; border-right: 0; max-height: none; }
+  .visuals { order: 1; }
+  .analysis-layout { order: 3; }
+  .command-column .coordinate-panel { display: grid; grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); }
+  .command-column .coordinate-panel > .panel-header { grid-column: 1 / -1; }
+  .command-column .coordinate-content { align-content: start; }
+  .command-column .manual-form { border-top: 0; border-left: 1px solid var(--line); }
+}
 @media(max-width:1099px) {
   #page-control { grid-template-columns: 380px minmax(0,1fr); }
   .analysis-layout .range-panel { grid-column: auto; }
@@ -151,9 +164,18 @@ body { background: #fff; }
   #history-summary { width: 100%; margin-left: 0; }
   .observation-fields { grid-template-columns: 1fr; }
   .section-heading { flex-wrap: wrap; }
-  .sensor-dock { grid-column: 1; grid-row: 2; display: block; }
-  .sensor-dock .depth-panel { grid-template-rows: 41px auto 47px 46px 34px; }
-  .sensor-dock .depth-image { height: auto; aspect-ratio: 4 / 3; }
-  .sensor-dock .rgb-tabs { min-height: 36px; }
-  .sensor-dock .rgb-views { display: block; }
+  .sensor-dock { grid-column: 1; grid-row: 2; height: calc(100vw * .75 + 216px); }
+  .sensor-dock .camera-panel { grid-template-rows: 41px minmax(0,1fr) 37px; }
+  .sensor-dock .camera-panel .camera-image { height: 100%; aspect-ratio: auto; }
+  .sensor-dock .panel-header { padding: 4px 5px; }
+  .sensor-dock .camera-panel h2, .sensor-dock .depth-panel h2 { font-size: 12px; }
+  .sensor-dock .status-label { font-size: 10px; }
+  .sensor-dock .depth-state { display: none; }
+  .depth-footer { padding: 2px 4px; gap: 2px; }
+  .depth-footer .camera-tools button { padding: 2px; font-size: 9px; }
+  .depth-controls { gap: 2px; }
+  .depth-controls .depth-readout { gap: 3px; padding: 4px; }
+  .depth-controls .depth-readout strong { font-size: 17px; }
+  .depth-controls #depth-quality { font-size: 9px; white-space: normal; }
+  .depth-controls .depth-scale { gap: 4px; padding: 3px 4px; }
 }

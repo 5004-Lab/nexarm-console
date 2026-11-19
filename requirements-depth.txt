@@ -1,3 +1,4 @@
 # Optional, isolated from the serial controller dependencies.
 -r requirements.txt
 pyrealsense2==2.58.4.10922
+Pillow==13.0.0

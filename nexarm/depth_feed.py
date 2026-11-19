@@ -2,6 +2,7 @@
 
 from collections import deque
 import gzip
+from io import BytesIO
 import json
 import struct
 import threading
@@ -33,6 +34,7 @@ class DepthFeed:
         self.closed = threading.Event()
         self.lock = threading.Lock()
         self.frames = deque(maxlen=2)
+        self.color_frames = deque(maxlen=2)
         self.state = "searching"
         self.error = ""
         self.details = {}
@@ -42,6 +44,23 @@ class DepthFeed:
             self.state, self.error = state, error
             if state != "live":
                 self.frames.clear()
+                self.color_frames.clear()
+
+    def color_frame(self, after=0):
+        with self.lock:
+            if self.state != "live":
+                return self.state, None
+            if not self.color_frames:
+                return "waiting", None
+            stamp, jpeg = self.color_frames[-1]
+            if time.monotonic() - stamp > 1:
+                return "waiting", None
+            return "live", (stamp, jpeg) if stamp > after else None
+
+    def color_info(self):
+        status, _ = self.color_frame()
+        return {"status": status, "configured_resolution": f"{self.width}x{self.height}",
+                "requested_fps": self.fps, "format": "rgb8-jpeg"}
 
     def frame(self, after=0):
         with self.lock:
@@ -62,6 +81,7 @@ class DepthFeed:
     def run(self):
         try:
             import pyrealsense2 as rs
+            from PIL import Image
         except (ImportError, OSError) as exc:
             self.update_state("unsupported", str(exc))
             return
@@ -84,6 +104,7 @@ class DepthFeed:
                 config = rs.config()
                 config.enable_device(serial)
                 config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
+                config.enable_stream(rs.stream.color, self.width, self.height, rs.format.rgb8, self.fps)
                 profile = pipeline.start(config)
                 started = True
                 intrinsics = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
@@ -94,17 +115,23 @@ class DepthFeed:
                 while not self.closed.is_set():
                     frames = pipeline.wait_for_frames(3000)
                     frame = frames.get_depth_frame()
-                    if not frame:
+                    color = frames.get_color_frame()
+                    if not frame or not color:
                         continue
                     stamp = time.monotonic()
                     pixels = np.asanyarray(frame.get_data()).copy()
                     info, packet = depth_packet(pixels, scale, dict(
                         base, stamp=stamp, captured_at_ms=round(time.time() * 1000),
-                        frame_number=frame.get_frame_number(), device_timestamp_ms=frame.get_timestamp()))
+                        frame_number=frame.get_frame_number(), device_timestamp_ms=frame.get_timestamp(),
+                        color_frame_number=color.get_frame_number(), color_device_timestamp_ms=color.get_timestamp()))
                     payload = gzip.compress(packet, compresslevel=1)
+                    output = BytesIO()
+                    Image.fromarray(np.asanyarray(color.get_data())).save(output, format="JPEG", quality=90)
+                    jpeg = output.getvalue()
                     with self.lock:
                         self.details = info
                         self.frames.append((stamp, payload))
+                        self.color_frames.append((stamp, jpeg))
                         self.state, self.error = "live", ""
             except Exception as exc:
                 self.update_state("unavailable", str(exc)[:300])

@@ -222,15 +222,13 @@ const commandColumn = Object.assign(document.createElement('aside'), { className
 commandColumn.append($('.coordinate-panel'));
 $('#page-control').insertBefore(commandColumn, $('.visuals'));
 const sensorDock = Object.assign(document.createElement('aside'), { className: 'sensor-dock', ariaLabel: '深度与彩色相机监控' });
-sensorDock.innerHTML = `${depthPanel}<nav class="rgb-tabs" aria-label="彩色参考视角"><span>彩色参考</span><button type="button" data-rgb-view="external" aria-pressed="true">第三人称</button><button type="button" data-rgb-view="wrist" aria-pressed="false">腕部</button></nav><div class="rgb-views"></div>`;
-sensorDock.querySelector('.rgb-views').append($('#external-camera'), $('#wrist-camera'));
+sensorDock.innerHTML = `${depthPanel}<section class="camera-panel panel" id="realsense-camera" aria-label="RealSense D405 RGB 彩色视频">
+  <header class="panel-header"><div class="panel-title"><h2>D405 RGB</h2></div><output class="camera-status status-label">等待画面</output></header>
+  <div class="camera-image visual-frame"><canvas hidden aria-label="D405 RGB 实时画面"></canvas><p class="camera-message">正在连接 D405 RGB 相机…</p></div>
+  <footer class="view-footer"><span>D405 彩色视角</span><span class="camera-details" hidden></span></footer></section><div class="depth-controls" aria-label="深度测量与标尺"></div>`;
+sensorDock.append($('#wrist-camera'), $('#external-camera'));
+sensorDock.querySelector('.depth-controls').append(sensorDock.querySelector('.depth-readout'), sensorDock.querySelector('.depth-scale'));
 $('.visuals').append(sensorDock);
-$('#wrist-camera').hidden = true;
-for (const button of sensorDock.querySelectorAll('[data-rgb-view]')) button.onclick = () => {
-  for (const peer of sensorDock.querySelectorAll('[data-rgb-view]')) peer.setAttribute('aria-pressed', String(peer === button));
-  $('#external-camera').hidden = button.dataset.rgbView !== 'external';
-  $('#wrist-camera').hidden = button.dataset.rgbView !== 'wrist';
-};
 const manualInputs = $('.manual-inputs');
 const jointTable = document.createElement('table');
 jointTable.setAttribute('aria-label', '六轴状态与跟踪');
@@ -248,7 +246,7 @@ for (const button of document.querySelectorAll('[data-signal]')) button.onclick 
 for (const figure of document.querySelectorAll('#page-telemetry .telemetry-grid [data-figure]')) figure.hidden = figure.dataset.figure !== 'angle';
 for (const panel of document.querySelectorAll('.camera-panel')) {
   const tools = document.createElement('div'); tools.className = 'camera-tools';
-  tools.innerHTML = '<button type="button" data-camera-fullscreen>放大查看</button><button type="button" data-camera-download>下载原图</button>';
+  tools.innerHTML = '<button type="button" data-camera-fullscreen>放大</button><button type="button" data-camera-download>原图 ↓</button>';
   panel.querySelector('.view-footer').append(tools);
 }
 
@@ -268,7 +266,8 @@ const camera = createCamera($('#wrist-camera'), feedback => twin.update(feedback
   capture.frame(frame);
 });
 createCamera($('#external-camera'), () => {}, () => {}, { endpoint: '/api/camera/external', syncPose: false });
-createDepth($('#depth-camera'));
+createCamera($('#realsense-camera'), () => {}, () => {}, { endpoint: '/api/camera/realsense', syncPose: false, name: 'D405 RGB 相机' });
+createDepth(sensorDock);
 const workspace = createWorkspace(twin, api, () => state, () => liveControl() && !busy);
 
 function showPage() {

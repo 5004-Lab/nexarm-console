@@ -7,7 +7,7 @@ const messages = {
   waiting: '正在等待实时画面…',
 };
 
-export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/api/camera', syncPose = true } = {}) {
+export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/api/camera', syncPose = true, name = '机械臂 USB 相机' } = {}) {
   const canvas = panel.querySelector('canvas');
   const context = canvas.getContext('2d');
   const message = panel.querySelector('.camera-message');
@@ -39,7 +39,8 @@ export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/a
     paired = false;
     deadline = 0;
     presented.length = 0;
-    status(state === 'missing' ? '未连接' : '等待画面', messages[state] || messages.unavailable);
+    const text = state === 'missing' ? `未检测到${name}` : state === 'searching' ? `正在查找${name}…` : messages[state] || messages.unavailable;
+    status(state === 'missing' ? '未连接' : '等待画面', text);
     canvas.hidden = true;
     details.hidden = true;
   }

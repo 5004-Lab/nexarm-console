@@ -21,7 +21,9 @@ class CameraHTTPTest(unittest.TestCase):
         self.external = SimpleNamespace(frame=lambda after: ("live", (20.0, b"external-jpeg")))
         self.depth_body = gzip.compress(b"native-z16-depth")
         self.depth = SimpleNamespace(frame=lambda after: ("live", (30.0, self.depth_body)),
-                                     info=lambda: {"status": "live", "depth_scale_m": .0001})
+                                     info=lambda: {"status": "live", "depth_scale_m": .0001},
+                                     color_frame=lambda after: ("live", (30.0, b"d405-rgb-jpeg")),
+                                     color_info=lambda: {"status": "live", "format": "rgb8-jpeg"})
 
     def server(self, external=True, password=None):
         server = ConsoleHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
@@ -56,6 +58,9 @@ class CameraHTTPTest(unittest.TestCase):
         self.assertEqual((external[0], external[2]), (200, b"external-jpeg"))
         self.assertIn("X-Camera-Pose", wrist[1])
         self.assertNotIn("X-Camera-Pose", external[1])
+        d405 = self.get(server, "/api/camera/realsense")
+        self.assertEqual((d405[0], d405[2]), (200, b"d405-rgb-jpeg"))
+        self.assertNotIn("X-Camera-Pose", d405[1])
 
     def test_missing_external_camera_does_not_break_wrist(self):
         server = self.server(external=False)
@@ -86,6 +91,8 @@ class CameraHTTPTest(unittest.TestCase):
         authorization = "Basic " + base64.b64encode(b"nexarm:test-password-long").decode()
         response = self.get(gateway, "/api/camera/external?after=0", {"Authorization": authorization})
         self.assertEqual((response[0], response[2]), (200, b"external-jpeg"))
+        response = self.get(gateway, "/api/camera/realsense?after=0", {"Authorization": authorization})
+        self.assertEqual((response[0], response[2]), (200, b"d405-rgb-jpeg"))
 
     def test_depth_requires_auth_and_gateway_preserves_compression(self):
         secured = self.server(password="test-password-long")

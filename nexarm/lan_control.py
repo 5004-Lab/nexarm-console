@@ -16,7 +16,7 @@ CONTROL_ACTIONS = frozenset({
     "move-joints", "jog", "stop", "run", "park", "capture-start", "capture-export",
     "observation-start", "observation-stop", "observation-mark",
 })
-READ_APIS = frozenset({"/api/state", "/api/camera", "/api/camera/external", "/api/camera-info", "/api/depth", "/api/depth-info", "/api/history/sessions", "/api/history/samples", "/api/history/archive", "/api/logs", "/api/capture-state", "/api/capture-file", "/api/capture-library"})
+READ_APIS = frozenset({"/api/state", "/api/camera", "/api/camera/external", "/api/camera/realsense", "/api/camera-info", "/api/depth", "/api/depth-info", "/api/history/sessions", "/api/history/samples", "/api/history/archive", "/api/logs", "/api/capture-state", "/api/capture-file", "/api/capture-library"})
 MAX_BODY = 65536
 
 

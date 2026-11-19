@@ -869,7 +869,7 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
             self.end_headers()
             self.wfile.write(body)
 
-        def camera_frame(self, feed, with_pose=True):
+        def camera_frame(self, feed, with_pose=True, color=False):
             if feed is None:
                 self.send_error(404)
                 return
@@ -878,7 +878,7 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
                 after = float(values.get("after", ["0"])[0])
             except ValueError:
                 after = 0
-            status, frame = feed.frame(after)
+            status, frame = feed.color_frame(after) if color else feed.frame(after)
             self.send_response(200 if frame else 204)
             self.send_header("X-Camera-State", status)
             self.send_header("Cache-Control", "no-store")
@@ -952,6 +952,7 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
                 info = {name: {"configured_resolution": feed.resolution, "requested_fps": feed.fps, "format": feed.input_format, "status": feed.frame(0)[0]} for name, feed in (("wrist", camera), ("external", external_camera)) if feed is not None and hasattr(feed, "resolution")}
                 if depth_camera:
                     info["depth"] = depth_camera.info()
+                    info["realsense_rgb"] = depth_camera.color_info()
                 self.response(info)
             elif path == "/api/capture-state" and recorder and not viewing:
                 self.response(recorder.snapshot())
@@ -986,6 +987,8 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
                 self.camera_frame(camera)
             elif path == "/api/camera/external":
                 self.camera_frame(external_camera, with_pose=False)
+            elif path == "/api/camera/realsense":
+                self.camera_frame(depth_camera, with_pose=False, color=True)
             elif self.path == "/api/state":
                 state = controller.snapshot(None if viewing else self.client())
                 if viewing:
