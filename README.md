@@ -1,12 +1,13 @@
 # NexArm Console
 
-新版 Linux 工作台支持持久操作记录、历史轨迹回看、原生尺寸双相机预览与示教采集。使用说明见 [WORKBENCH.md](WORKBENCH.md)，Linux 部署见 [DEPLOYMENT.md](DEPLOYMENT.md)，独立抓取准备项目见 [Grasp Lab](experiments/grasp-lab/README.md)。
+NexArm 六舵机机械臂的浏览器工作台，集成数字孪生、XYZ 与关节控制、运动遥测和历史轨迹。Linux 示教工作台支持四路同步采集、录制中回看、阶段标注、手动裁剪和 ACT 训练包导出。
 
-NexArm 六舵机机械臂的浏览器工作台。机械臂和腕部 RGB 相机接到同一台电脑，由该电脑提供串口控制、运动规划、实测反馈和相机画面。浏览器提供数字孪生、XYZ 目标控制、六轴角度输入、反馈曲线和动作组编辑。
+详细使用说明见 [WORKBENCH.md](WORKBENCH.md)，Linux 部署及 D405 配置见 [DEPLOYMENT.md](DEPLOYMENT.md)，独立抓取实验见 [Grasp Lab](experiments/grasp-lab/README.md)。
 
 ## 环境要求
 
-- 主控电脑建议使用 macOS，腕部相机采集程序使用 Swift 和 AVFoundation。安装 Xcode Command Line Tools（`xcode-select --install`），并在系统提示时授权使用相机。
+- 四路示教使用 Linux、FFmpeg、V4L2、两台 USB RGB 相机和一台 RealSense D405。D405 通过 `requirements-depth.txt` 安装可选依赖，启动时加 `--depth-camera`。设备选择和 SDK 平台要求见 [Linux 部署](DEPLOYMENT.md#optional-realsense-d405-depth)。
+- macOS 下的腕部 RGB 采集使用 Swift 和 AVFoundation。请安装 Xcode Command Line Tools（`xcode-select --install`），并在系统提示时授权使用相机。
 - Python 3.9 或以上，Node.js 20.19+ 或 22.12+，以及支持 WebGL 的现代浏览器。
 - 首次构建需访问 npm、PyPI 和 GitHub 原始文件服务。后续构建会复用本地缓存的模型文件。
 
@@ -32,7 +33,7 @@ NexArm 六舵机机械臂的浏览器工作台。机械臂和腕部 RGB 相机�
 
 1. **移动到 XYZ**。基座坐标以毫米为单位。可输入 XYZ，也可用「三维选点」拖动 X/Y/Z 箭头或按毫米步长微调，并旋转视角确认深度。「确认目标并检查路径」或「检查路径」会预检可达性和几何碰撞；修改目标后需重新检查，再点击「移动到目标」执行。蓝点表示根据编码器估算的当前工具点，橙点表示目标。
 2. **设置关节角度**。手动输入 J1–J6 的目标角度（°），只对修改过的轴下发目标。「动作组与调试」中的单轴点动可按 °/s 设置速度上限。J6 控制夹爪开合。
-3. **观察反馈**。数字孪生与腕部彩图并排。收到匹配的视频帧时，双视图按采集时间配对实测姿态。预览满幅显示并可能裁剪边缘，原始数据包保留完整 RGB JPEG。「运动遥测」包含六轴角度、角速度、角加速度、夹爪开度、末端坐标及跟踪误差。速度和加速度从实测编码器按时间差分并滤波。夹爪开度按模型行程换算百分比。科研图表由 Apache ECharts 以 SVG 渲染，曲线使用 [MATLAB 的浅色 gem 配色](https://www.mathworks.com/help/matlab/ref/matlab.graphics.axis.axes-properties.html)。每张图可导出 SVG。工作空间热图显示整个模型可达采样集的 XY 投影，颜色表示每个网格的样本数。
+3. **观察反馈**。控制页显示数字孪生和四路相机，腕部画面在能匹配编码器反馈时会同步实测姿态。预览保留画面比例，采集包保存完整 RGB JPEG 和原始深度。「运动遥测」包含六轴角度、角速度、角加速度、夹爪开度、末端坐标及跟踪误差。速度和加速度从实测编码器按时间差分并滤波。夹爪开度按模型行程换算百分比。曲线用 Apache ECharts 渲染，可导出 SVG，采用 [MATLAB 的浅色 gem 配色](https://www.mathworks.com/help/matlab/ref/matlab.graphics.axis.axes-properties.html)。工作空间热图显示模型可达采样集的 XY 投影，颜色表示每个网格的样本数。
 4. **停止运动**。使用页面的「停止」取消后续指令，并请求保持实测位置。板载动作由连接机械臂的本机控制台停止。
 
 XYZ 逆运动学从当前姿态和多组候选初值求解，优先维持工具朝向并保留夹爪开度。规划器先验证关节解及六轴行程，再搜索直达路径或通过碰撞验证的绕行路径。执行时在新的编码器采样上连续下发限幅前瞻位置，轴跟踪持续偏差时从实测姿态重新求解。几何预检通过后仍需实机反馈验收。末端 XYZ 容差 3 mm，执行异常时界面报告对应关节及实测偏差。
@@ -45,20 +46,34 @@ XYZ 逆运动学从当前姿态和多组候选初值求解，优先维持工具�
 
 ## 数据采集与训练
 
-1. 在「动作组与调试」保存至少两帧。首帧是每回合的起始姿态，设备从第二帧开始记录动作。
-2. 在「数据采集」输入自然语言任务、采样率和回合数。准备好场景，检查相机和 USB 状态，再点击「开始重复采集」。系统自动回到首帧并执行下一回合。实际物体和场景布置需要满足重复运行条件。运行期间保持控制页面在前台，控制心跳中断时机械臂会停止。
-3. 平台使用主机单调时钟对齐腕部 RGB、六轴编码器和串口实际下发指令。帧间同步容差为 65 ms，出现缺帧或跟踪失败的回合不进入训练包。界面显示回合进度、采样数量、丢帧和时差。
-4. 在采集记录中下载原始 ZIP。内含 `manifest.json`、每回合的 `frames.jsonl` 与 RGB JPEG。日志保留相机、反馈、动作三个时间戳，动作字段为采集时刻前最后一次下发的六轴绝对角度。该文件可用于逐帧复核。
+1. 在「数据采集」填写任务指令，可补充目标物体、场景和标定编号。点击「开始 Episode」，再到「机械臂控制」进行示教。
+2. 采集页以一行四列显示已写入的最新画面，轨迹图和逐帧时间戳在下方更新。拖动时间轴可回看已保存的部分，后台继续录制。点击「回到实时」跟随最新帧。
+3. 结束并保存后，拖选时间带或逐帧设置起点和终点，再保存阶段。阶段写入对应帧的 `stage` 字段，与任务文本和成功或失败结果分别保存。
+4. 用「裁掉开头」「裁掉结尾」或「保留选中区间」确定范围，普通播放可只播保留范围。可恢复整段，也可标记中间的剔除区间。清洗报告显示时差、剔除原因和可用于训练的连续片段。
+5. 可下载完整原始包。标记为成功且清洗后仍有可用片段的 Episode 可下载训练包，内含保留且通过检查的帧和对应阶段。
 
-本机可选安装 LeRobot 导出环境（Python 3.12），支持生成 [LeRobotDataset v3](https://huggingface.co/docs/lerobot/v0.4.4/lerobot-dataset-v3) 的 MP4、Parquet 和元数据。
+| 画面顺序 | 训练字段 | 数据 |
+| --- | --- | --- |
+| D405 RGB | `observation.images.front` | JPEG |
+| D405 深度 | `observation.depth` | 原始 16 位 Z16，包含深度比例和内参 |
+| 腕部 RGB | `observation.images.wrist` | JPEG |
+| 第三人称 RGB | `observation.images.third` | JPEG |
+
+示教默认以 5 Hz 记录，四路默认尺寸均为 640×480。D405 RGB 和深度来自同一帧组。平台使用主机单调时钟对齐各路相机、关节反馈与已下发指令，分别保留源时间戳。默认清洗要求四路画面齐全，模态间时差不超过 45 ms，源帧时效不超过 120 ms。
+
+训练用的 `observation.state` 保存实测值，`action` 保存实际下发的目标。两者均为六维，前五维是 J1–J5 的角度，末维是从 J6 换算的夹爪 0–1 开度。采集数据保存在主控电脑的 `.data/episodes/`，ZIP 包含 `manifest.json`、`frames.jsonl`、`segments.jsonl`、`events.jsonl` 和各路媒体。
+
+### 转换为 LeRobot ACT 数据集
+
+在训练机安装 LeRobot 0.4.4，将同一训练划分的已清洗 ZIP 一起转换为 [LeRobotDataset v3](https://huggingface.co/docs/lerobot/v0.4.4/lerobot-dataset-v3)。
 
 ```sh
-python3.12 -m venv .lerobot
-.lerobot/bin/python -m pip install 'lerobot==0.4.4'
-./start.sh
+python -m pip install 'lerobot==0.4.4'
+python scripts/export-episodes-lerobot.py demo-a-training.zip demo-b-training.zip --output datasets/nexarm-train
+lerobot-train --dataset.repo_id=nexarm/teaching --dataset.root=datasets/nexarm-train --policy.type=act --policy.push_to_hub=false
 ```
 
-检测到该环境后，平台默认采集结束自动生成 LeRobot v3，也支持手动导出。解压下载文件后可使用 `LeRobotDataset(repo_id, root=dataset_dir, video_backend="pyav")` 读取。训练策略应将 `observation.images.wrist`、`observation.state`、`action` 和任务指令映射到策略输入。采集与导出路径位于本机 `.data/captures/`，不会自动上传。
+转换默认使用 D405 RGB、腕部 RGB、任务文本、关节状态和动作。清洗时要求第三人称画面后，可加 `--third` 将它纳入数据集。深度和阶段标签保存在训练 ZIP，供按阶段筛选或适配其他模型。
 
 ## 局域网
 
@@ -111,6 +126,8 @@ python3.12 -m venv .lerobot
 | `nexarm/kinematics.py` | 正逆运动学、关节约束、路径和碰撞检查 |
 | `nexarm/lan_control.py` | 局域网操作入口，校验指定来源并转发操作 |
 | `nexarm/camera_feed.py`、`camera/` | 宿主端相机帧读取和 macOS RGB 采集助手 |
+| `nexarm/episodes.py` | 四路示教录制、同步、片段标注、清洗和 ZIP 导出 |
+| `scripts/export-episodes-lerobot.py` | 将清洗后的训练 ZIP 转成 LeRobot v3 数据集 |
 | `scripts/fetch-model.py` | 下载、校验并转换官方模型 |
 | `start.sh` | 初始化依赖、构建并启动 |
 
@@ -132,3 +149,7 @@ camera/build.sh  # macOS，需要相机时运行
 - **USB 未连接**。确认串口设备名，关闭占用该串口的厂商软件，再检查服务是否收到六轴反馈。
 - **相机无画面**。确认腕部相机已接入、编译了采集助手、macOS 已授予相机权限，并用 `--camera-device` 指定设备名称。
 - **远端显示「仅查看」**。查看使用 `8765`。确认控制网关已启动，从授权电脑使用 `8766` 并点击「启用控制」。
+
+## 提交说明
+
+推送 GitHub 前检查本 README。涉及界面、采集流程、数据格式、依赖或启动方式的变更，将相应说明与代码一并提交。
