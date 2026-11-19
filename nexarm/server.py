@@ -13,6 +13,7 @@ import secrets
 import shutil
 import signal
 import struct
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -25,6 +26,7 @@ from .depth_feed import DepthFeed
 from .linux_serial import initialize_generic_ch340
 from .recording import Recorder
 from .history import History
+from .episodes import Episodes
 
 ROOT = Path(__file__).resolve().parents[1]
 JOINTS = kinematics.JOINTS
@@ -115,6 +117,7 @@ class Controller:
         self.zero_readings = 0
         self.version = None
         self.owner = None
+        self.owner_since = 0
         self.lease_end = 0
         self.limits = None
         self.torque = [None] * 6
@@ -326,6 +329,8 @@ class Controller:
                     raise ValueError("另一个页面正在控制机械臂")
                 if not self.feedback_ok(now) or not self.power_ok(now):
                     raise ValueError("请等待关节反馈和供电就绪")
+                if self.owner != client:
+                    self.owner_since = now
                 self.owner = client
                 self.lease_end = now + LEASE_TIMEOUT
                 self.limits = kinematics.joint_limits(self.positions())
@@ -829,7 +834,7 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
     request_queue_size = 64
 
 
-def application(controller, origin, camera, view_password=None, recorder=None, external_camera=None, history=None, depth_camera=None):
+def application(controller, origin, camera, view_password=None, recorder=None, external_camera=None, history=None, depth_camera=None, episodes=None):
     key = secrets.token_urlsafe(32)
     viewing = view_password is not None
     authorization = "Basic " + base64.b64encode(f"nexarm:{view_password}".encode()).decode() if viewing else ""
@@ -904,7 +909,9 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
             if not self.allow_view():
                 return
             path = urlsplit(self.path).path
-            if path == "/api/history/sessions" and history:
+            if path.startswith("/api/episodes/") and episodes and not viewing:
+                self.episode_get(path)
+            elif path == "/api/history/sessions" and history:
                 self.response(history.sessions())
             elif path in ("/api/history/samples", "/api/history/archive") and history:
                 try:
@@ -1010,6 +1017,49 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
             if self.allow_view():
                 super().do_HEAD()
 
+        def episode_get(self, path):
+            params = parse_qs(urlsplit(self.path).query)
+            identifier = params.get("id", [""])[0]
+
+            def send(stream, content_type, name=None, encoding=None):
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(os.fstat(stream.fileno()).st_size))
+                self.send_header("Cache-Control", "no-store")
+                if name:
+                    self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+                if encoding:
+                    self.send_header("Content-Encoding", encoding)
+                self.end_headers()
+                try:
+                    shutil.copyfileobj(stream, self.wfile, 256 * 1024)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            try:
+                if path == "/api/episodes/library":
+                    self.response(episodes.library())
+                elif path == "/api/episodes/detail":
+                    self.response(episodes.detail(identifier))
+                elif path == "/api/episodes/media":
+                    channel = params.get("channel", [""])[0]
+                    file = episodes.media(identifier, int(params.get("frame", ["-1"])[0]), channel)
+                    with file.open("rb") as stream:
+                        send(stream, "application/octet-stream" if channel == "depth" else "image/jpeg",
+                             encoding="gzip" if channel == "depth" else None)
+                elif path == "/api/episodes/archive":
+                    variant = params.get("format", [""])[0]
+                    if variant not in ("raw", "training"):
+                        raise ValueError("无效的导出格式")
+                    with tempfile.TemporaryFile(dir=episodes.root) as stream:
+                        episodes.archive(identifier, variant == "training", stream)
+                        stream.seek(0)
+                        send(stream, "application/zip", f"nexarm-episode-{identifier}-{variant}.zip")
+                else:
+                    self.send_error(404)
+            except (ValueError, OSError) as exc:
+                self.response({"error": str(exc)}, 404 if isinstance(exc, FileNotFoundError) else 409)
+
         def do_POST(self):
             if viewing:
                 self.close_connection = True
@@ -1028,7 +1078,15 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
                 data = json.loads(self.rfile.read(size))
                 if not isinstance(data, dict):
                     raise ValueError("请求格式无效")
-                if action == "observation-start" and history:
+                if action == "episode-start" and episodes:
+                    result = episodes.start(client, data)
+                elif action == "episode-stop" and episodes:
+                    result = episodes.stop(client, data)
+                elif action == "episode-mark" and episodes:
+                    result = episodes.mark(client, data)
+                elif action == "episode-review" and episodes:
+                    result = episodes.review(data)
+                elif action == "observation-start" and history:
                     result = history.start(data)
                 elif action == "observation-stop" and history:
                     result = history.stop()
@@ -1062,7 +1120,7 @@ def main():
     parser.add_argument("--camera-resolution", default="640x480")
     parser.add_argument("--external-camera-device", help="Third-person USB camera device")
     parser.add_argument("--external-camera-format", choices=("mjpeg", "yuyv422"), default="mjpeg")
-    parser.add_argument("--external-camera-resolution", default="1920x1080")
+    parser.add_argument("--external-camera-resolution", default="640x480")
     parser.add_argument("--depth-camera", nargs="?", const="auto", help="Enable RealSense D405 depth; optionally specify its serial")
     parser.add_argument("--lan-host", help="IPv4 address for password-protected LAN viewing")
     parser.add_argument("--lerobot-python", default=os.environ.get("NEXARM_LEROBOT_PYTHON"),
@@ -1083,8 +1141,11 @@ def main():
     export_path = Path(args.lerobot_python).expanduser().absolute() if args.lerobot_python else ROOT / ".lerobot/bin/python"
     exporter = str(export_path) if os.access(export_path, os.X_OK) else None
     recorder = Recorder(controller, camera, ROOT / ".data" / "captures", exporter)
+    episodes = Episodes(controller, camera, external_camera, depth_camera, ROOT / ".data" / "episodes")
+    episode_worker = threading.Thread(target=episodes.run, daemon=True)
+    episode_worker.start()
     origin = f"http://127.0.0.1:{args.port}"
-    server = ConsoleHTTPServer(("127.0.0.1", args.port), application(controller, origin, camera, recorder=recorder, external_camera=external_camera, history=history, depth_camera=depth_camera))
+    server = ConsoleHTTPServer(("127.0.0.1", args.port), application(controller, origin, camera, recorder=recorder, external_camera=external_camera, history=history, depth_camera=depth_camera, episodes=episodes))
     lan_thread = None
     if args.lan_host:
         lan_origin = f"http://{args.lan_host}:{args.port}"
@@ -1114,6 +1175,8 @@ def main():
         pass
     finally:
         controller.closing.set()
+        episodes.closed.set()
+        episode_worker.join(3)
         history.closed.set()
         history_worker.join(3)
         if lan_thread is not None:

@@ -69,6 +69,7 @@ class DepthFeed:
         self.lock = threading.Lock()
         self.frames = deque(maxlen=2)
         self.color_frames = deque(maxlen=2)
+        self.record_frames = deque(maxlen=8)
         self.state = "searching"
         self.error = ""
         self.details = {}
@@ -79,6 +80,11 @@ class DepthFeed:
             if state != "live":
                 self.frames.clear()
                 self.color_frames.clear()
+                self.record_frames.clear()
+
+    def sample_at(self, stamp):
+        with self.lock:
+            return next((frame for frame in reversed(self.record_frames) if frame[0] <= stamp), None)
 
     def color_frame(self, after=0):
         with self.lock:
@@ -183,6 +189,7 @@ class DepthFeed:
                         self.details = info
                         self.frames.append((stamp, payload))
                         self.color_frames.append((stamp, jpeg))
+                        self.record_frames.append((stamp, jpeg, pixels, info))
                         self.state, self.error = "live", ""
             except Exception as exc:
                 self.update_state("unavailable", str(exc)[:300])

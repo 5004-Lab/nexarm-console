@@ -32,10 +32,10 @@
 ## 原始采集尺寸
 
 Linux 可用 `--camera-resolution` 和 `--external-camera-resolution` 选择设备支持的采集尺寸。
-本次设备实测：腕部 icSpring 仅支持 640×480 YUYV，第三人称 HDR CAMERA-A 支持最高 2592×1944 MJPEG。
+当前四路均以 640×480 采集：新腕部 icSpring 使用 YUYV，原腕部 icSpring 作为第三人称使用 MJPEG，D405 输出 RGB 和 Z16 深度。
 页面尺寸是预览尺寸；“放大查看”和“下载原图”使用收到的完整 JPEG。
 腕部 YUYV 在主机编码为 JPEG，保留原生像素尺寸，并非无损传输原始 YUYV。
-第三人称 MJPEG 直接保留设备 JPEG 字节，页面不会裁掉图像边缘。
+第三人称 MJPEG 直接保留设备 JPEG 字节，页面保留图像边缘。
 两个 USB 相机应接在不同总线控制器，避免带宽分配失败。
 
 ## 双视角示教
@@ -94,3 +94,24 @@ D405 RGB 与深度由同一个 RealSense pipeline 同时采集，RGB 原生 640�
 连接状态区分“服务未连接”“等待 USB”“等待控制板回复”，控制按钮提示具体锁定原因。只有有效关节反馈和供电反馈恢复后才能启用控制。网络 IP 变化后需同步更新本地服务监听地址与访问链接；网络省电等系统配置不由应用修改。
 
 当前双 RGB 示教记录与 ZIP 尚不包含 D405 RGB 或深度；D405 原图通过各自下载按钮保存。
+
+## 多模态 Episode 示教
+
+在「数据采集」填写自然语言任务和场景，可选标定编号与 Front 相机。按「开始 Episode」后转到「机械臂控制」操作，顶栏会显示采样数量并可跳回采集页。回到采集页添加阶段或自由文本标注，选择结果并结束保存。开始和结束只管理数据采集。原始记录写入服务器的 .data/episodes，关页面不会立即停止，最长 20 分钟。刷新导致原控制会话结束时，可以结束并保存原 Episode，再开始新的示教。
+
+- 默认 Front 是 D405 RGB，Wrist 是新腕部 icSpring，Third 是原腕部 icSpring，Depth 是同次 D405 frameset 的原始 Z16。可将第三人称 RGB 选为 Front。Episode 清单保存各路设备身份。D405 原始深度使用小端 NDEPTH v1 并以 gzip 保存，包含原始尺寸、比例、内参和设备时间戳。RGB 与深度保留原生投影坐标。
+- 记录以主机单调时钟建立 5 Hz 网格。每个观测选用对应 tick 及之前最近一帧，保留源时间戳和相对 tick 的毫秒偏差。动作是该示教页面本回合实际通过桥接发出的最后一个绝对目标，等待首条指令或失去控制时存为 null。跳过的 tick 留有帧号间隔。主机接收时间对齐适用于采集；传感器曝光同步需另行校验。
+- 实机 J6 驱动夹爪，训练向量为 [J1,J2,J3,J4,J5,gripper]，前五维单位为度，夹爪由 J6 模型行程换算为 0–1 开度。源编码器的六维脉冲仍完整保存。
+- 回放提供同步画面、实际/指令曲线、逐帧值、阶段跳转与时差。用时间轴设置裁剪边界，编辑任务与结果，设置最大时间偏差和最短片段。默认每帧要求 Front、Wrist、实际状态及动作。可加上 Third 和 Depth。清洗剔除缺失、重复、超时和孤立尖峰（相邻反馈接近，中间读数相对前后均偏离超过 20°），在缺口处断开轨迹。所有原始帧保留。
+- 原始 ZIP 用于归档。训练 ZIP 仅对标为成功并已生成有效片段的 Episode 开放，内含 manifest.json、frames.jsonl、events.jsonl 及媒体。归一化使用保留帧的逐维均值和标准差（标准差至少 0.01），归一化列是每个 Episode 的质检视图。多回合训练使用训练集重新拟合统计，按原始 Episode 做训练/验证划分。
+
+### 导入 LeRobot ACT
+
+在训练机安装 [LeRobot 0.4.4](https://github.com/huggingface/lerobot/tree/v0.4.4)，把同一训练划分的 ZIP 一起转换。在 Windows 上可以显式逐个填写 ZIP 路径。
+
+```text
+python scripts/export-episodes-lerobot.py demo-a-training.zip demo-b-training.zip --output datasets/nexarm-train
+lerobot-train --dataset.repo_id=nexarm/teaching --dataset.root=datasets/nexarm-train --policy.type=act --policy.push_to_hub=false
+```
+
+导出保留任务，每个连续片段单独写入 LeRobot Episode。LeRobot 根据导入的物理量重新计算全训练集统计。默认模型输入是 Front、Wrist 和关节状态；清洗时要求 Third 后，可用 --third 一起转换。JPEG 原图和 Z16 保留在训练 ZIP。VLA 根据选定模型映射图像键、任务文本和动作空间，使用深度的模型可以从同一 ZIP 读取 Z16。

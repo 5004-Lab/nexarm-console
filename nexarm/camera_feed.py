@@ -50,6 +50,12 @@ class CameraFeed:
             return min((frame for frame in self.frames if frame[0] > after),
                        key=lambda frame: abs(frame[0] - stamp), default=None)
 
+    def sample_at(self, stamp):
+        with self.lock:
+            if self.state != "live":
+                return None
+            return next((frame for frame in reversed(self.frames) if frame[0] <= stamp), None)
+
     def update_state(self, state):
         with self.lock:
             self.state = state

@@ -8,6 +8,7 @@ import { createWorkspace } from './workspace.js';
 import { chart, createTelemetry, jointRangeTable } from './telemetry.js';
 import { capturePage, createCapture } from './capture.js';
 import { historyToolbar, observationForm, createHistory } from './history.js';
+import { episodePage, createEpisodes } from './episodes.js';
 import workcell from './workcell.json';
 import { jointAngle, jointPosition, angleSpeed } from './joint-units.js';
 import bot from 'lucide-static/icons/bot.svg?raw';
@@ -76,7 +77,7 @@ try {
 $('#app').innerHTML = `
 <header class="app-bar">
   <a class="brand" href="#control" aria-label="NexArm 机械臂实验台"><span>${bot}</span><b>NexArm</b><i></i><small>机械臂实验台</small></a>
-  <div class="status-items"><span id="link" class="connection"><i></i><span>等待连接</span></span><span id="voltage" class="metric">— V</span><span id="firmware" class="metric">—</span>
+  <div class="status-items"><a id="episode-indicator" href="#capture" hidden></a><span id="link" class="connection"><i></i><span>等待连接</span></span><span id="voltage" class="metric">— V</span><span id="firmware" class="metric">—</span>
   <button id="arm" class="arm-button" type="button" disabled>${lock}<span>启用控制</span></button><button id="motion-stop" class="danger-button" type="button" disabled>停止</button></div>
 </header>
 <nav class="page-nav" aria-label="工作台页面">
@@ -151,7 +152,7 @@ ${historyToolbar}
     <div class="chart-grid geometry-grid">${chart('range')}${chart('workspace')}</div>
     <section class="operation-events"><header class="section-heading"><h2>操作阶段与事件</h2></header><table><thead><tr><th>记录时间</th><th>事件 / 阶段标注</th></tr></thead><tbody id="operation-events"></tbody></table></section>
   </div>
-  <div class="work-page" id="page-capture" hidden>${observationForm}<details class="automated-capture"><summary>动作组重复采集（腕部单视角）与 LeRobot 导出</summary>${capturePage}</details></div>
+  <div class="work-page" id="page-capture" hidden>${episodePage}<details class="automated-capture"><summary>旧版双视角采集</summary>${observationForm}</details><details class="automated-capture"><summary>动作组重复采集（腕部单视角）与 LeRobot 导出</summary>${capturePage}</details></div>
   <div class="work-page" id="page-actions" hidden>
     <div class="page-heading"><h1>动作组与调试</h1><span>单轴点动 · 动作序列 · 串口日志</span></div>
     <p id="action-notice" class="notice" role="status"></p>
@@ -268,6 +269,7 @@ const camera = createCamera($('#wrist-camera'), feedback => twin.update(feedback
 createCamera($('#external-camera'), () => {}, () => {}, { endpoint: '/api/camera/external', syncPose: false });
 createCamera($('#realsense-camera'), () => {}, () => {}, { endpoint: '/api/camera/realsense', syncPose: false, name: 'D405 RGB 相机' });
 createDepth(sensorDock);
+const episodes = createEpisodes(api, () => Boolean(state.remote_view), () => Boolean(state.operator_busy));
 const workspace = createWorkspace(twin, api, () => state, () => liveControl() && !busy);
 
 function showPage() {
@@ -281,7 +283,12 @@ function showPage() {
     if (shown) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
-  if (activePage === 'capture') capture.refresh();
+  if (activePage === 'capture') {
+    capture.refresh();
+    episodes.refresh();
+  } else {
+    episodes.pause();
+  }
   window.scrollTo(0, 0);
   updateControlHeight();
 }
@@ -296,6 +303,7 @@ for (const element of document.querySelectorAll('.app-bar, .page-nav, .history-t
 window.addEventListener('resize', updateControlHeight);
 window.addEventListener('hashchange', showPage);
 showPage();
+episodes.refresh(true);
 
 function setView(view) {
   twin.view(view);
