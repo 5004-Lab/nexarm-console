@@ -2,7 +2,9 @@ import { colorizeDepth, parseDepthPacket } from './depth-data.js';
 import { episodeChart, trajectoryNames, trajectoryValues } from './episode-chart.js';
 
 const rgb = ['front', 'wrist', 'third'];
-const labels = { front: 'Front RGB', wrist: 'Wrist RGB', third: 'Third RGB', depth: 'D405 深度', feedback: '关节反馈', action: '下发指令' };
+const cameraOrder = ['front', 'depth', 'wrist', 'third'];
+const labels = {front: 'D405 RGB', depth: 'D405 深度', wrist: '腕部 RGB 相机', third: '第三人称相机', feedback: '关节反馈', action: '下发指令'};
+const channelNames = {front: 'Front', depth: 'Depth · 原始 16 位', wrist: 'Wrist', third: 'Third'};
 const results = { recording: '采集中', success: '成功', failure: '失败', unrated: '待评定', interrupted: '中断' };
 const phases = ['接近', '夹取', '提起', '搬运', '放置', '撤离'];
 const phaseColors = ['#0072BD', '#B94B14', '#8A5A04', '#7E2F8E', '#488224', '#236F88'];
@@ -19,8 +21,9 @@ export const episodePage = `<section class="episode-workbench" aria-label="多�
       <label>目标物体<input name="objects" maxlength="240"></label>
       <label>场景<input name="scene" maxlength="240"></label>
       <label>标定编号<input name="calibration" maxlength="240"></label>
-      <label>Front 相机<select name="front"><option value="d405">D405 RGB</option><option value="external">第三人称 RGB</option></select></label>
     </div>
+    <div class="episode-streams" aria-label="固定采集通道">${cameraOrder.map(channel =>
+      `<div><strong>${labels[channel]}</strong><span>${channelNames[channel]}</span><output data-episode-count="${channel}" hidden></output></div>`).join('')}</div>
     <div class="episode-actions"><button class="primary-button" id="episode-start">开始 Episode</button>
       <button type="button" id="episode-stop" disabled>结束并保存</button>
       <label>执行结果<select id="episode-result"><option value="unrated">待评定</option><option value="success">成功</option><option value="failure">失败</option></select></label>
@@ -30,8 +33,8 @@ export const episodePage = `<section class="episode-workbench" aria-label="多�
   <output class="episode-message" id="episode-message" role="status"></output>
   <header class="section-heading"><h2>Episode 回放与清洗</h2><select id="episode-library" aria-label="选择 Episode"><option value="">正在加载…</option></select></header>
   <div id="episode-detail" hidden>
-    <div class="episode-preview" aria-label="同步回放画面">${[...rgb, 'depth'].map(channel => `<figure>
-      <figcaption>${labels[channel]} <span data-episode-source="${channel}"></span><time data-episode-source-time="${channel}"></time></figcaption>
+    <div class="episode-preview" aria-label="同步回放画面">${cameraOrder.map(channel => `<figure data-episode-channel="${channel}">
+      <figcaption><strong data-episode-source="${channel}">${labels[channel]}</strong><span>${channelNames[channel]}</span><time data-episode-source-time="${channel}"></time></figcaption>
       <div><canvas hidden role="img" aria-label="${labels[channel]} 回放"></canvas>
       <span data-episode-missing="${channel}">等待画面</span></div>
     </figure>`).join('')}</div>
@@ -108,8 +111,8 @@ export function createEpisodes(api, readOnly, operator) {
   const record = $('#episode-record'), review = $('#episode-review'), library = $('#episode-library');
   const play = $('#episode-play'), seek = $('#episode-seek'), track = $('#episode-track');
   const segmentForm = $('#episode-segment');
-  const figures = Object.fromEntries([...document.querySelectorAll('.episode-preview figure')].map((figure, i) =>
-    [[...rgb, 'depth'][i], { element: figure.querySelector('canvas'), message: figure.querySelector('[data-episode-missing]') }]));
+  const figures = Object.fromEntries([...document.querySelectorAll('[data-episode-channel]')].map(figure =>
+    [figure.dataset.episodeChannel, {element: figure.querySelector('canvas'), message: figure.querySelector('[data-episode-missing]')}]));
   let active, detail, selected, decisions = new Map(), position = 0;
   let first = null, last = null, editing = null, drag = null, framePending = false;
   let owned = sessionStorage.getItem('nexarm-episode-id');
@@ -134,6 +137,11 @@ export function createEpisodes(api, readOnly, operator) {
     $('#episode-indicator').textContent = active ? `● Episode ${active.episode_index} · ${active.samples} 帧` : '';
     $('#episode-start').disabled = readOnly() || busy || Boolean(active);
     $('#episode-stop').disabled = readOnly() || busy || !active || (!own && operator());
+    for (const channel of cameraOrder) {
+      const counter = $(`[data-episode-count="${channel}"]`);
+      counter.hidden = !active?.media_counts;
+      if (active?.media_counts) counter.textContent = `${active.media_counts[channel]} / ${active.samples} 帧`;
+    }
   }
 
   async function refresh(force = false) {
@@ -306,7 +314,7 @@ export function createEpisodes(api, readOnly, operator) {
     cells($('#episode-timestamps'), [['采样目标', at(timestamp), '0.00'], ...sourceKeys.map(key => {
       const time = row.source_timestamps[key];
       const offset = key === 'action' && Number.isFinite(time) ? (time - timestamp) * 1000 : row.sync_ms[key];
-      return [labels[key], at(time), Number.isFinite(offset) ? offset.toFixed(2) : '—'];
+      return [sourceTitle(key), at(time), Number.isFinite(offset) ? offset.toFixed(2) : '—'];
     })]);
     const offsets = Object.values(row.sync_ms);
     const span = offsets.length >= 2 ? (Math.max(...offsets) - Math.min(...offsets)).toFixed(2) : '—';
@@ -317,6 +325,14 @@ export function createEpisodes(api, readOnly, operator) {
     const playhead = $('#episode-playhead');
     playhead.hidden = false; playhead.style.left = `${trackPercent(timestamp)}%`;
     trajectory.position(timestamp);
+  }
+
+  function sourceTitle(channel) {
+    const role = detail.metadata.camera_roles?.[channel];
+    if (role === 'd405' && channel !== 'depth') return 'D405 RGB';
+    if (role === 'external') return '第三人称相机';
+    if (role === 'hdr') return 'HDR 全景';
+    return labels[channel];
   }
 
   async function frameAt(index) {
@@ -424,10 +440,12 @@ export function createEpisodes(api, readOnly, operator) {
       $('#episode-prepare').disabled = !detail.frames.length || readOnly();
       $('#episode-raw').href = endpoint('archive', id, {format: 'raw'});
       $('#episode-training').href = endpoint('archive', id, {format: 'training'});
-      for (const [channel, name] of Object.entries(detail.metadata.camera_labels || detail.metadata.camera_roles)) {
+      for (const channel of cameraOrder) {
         const tag = $('[data-episode-source="' + channel + '"]');
+        const name = sourceTitle(channel);
         tag.textContent = name;
         tag.title = detail.metadata.camera_devices?.[channel] || name;
+        figures[channel].element.setAttribute('aria-label', name + ' 回放');
       }
       $('#episode-events').replaceChildren(...detail.annotations.map(event => {
         const button = document.createElement('button'); button.type = 'button';

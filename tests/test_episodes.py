@@ -71,11 +71,12 @@ class EpisodeTests(unittest.TestCase):
                 return True
 
         class Feed:
-            def __init__(self, depth=False):
+            def __init__(self, depth=False, jpeg=b"jpeg placeholder"):
                 self.depth = depth
+                self.jpeg = jpeg
 
             def sample_at(self, stamp):
-                frame = (stamp - .03, b"jpeg placeholder")
+                frame = (stamp - .03, self.jpeg)
                 pixels = np.array([[1, 256], [0, 1000]], dtype=np.uint16)
                 return (*frame, pixels, dict(width=2, height=2, depth_scale_m=.0001,
                                              valid_percent=75, captured_at_ms=1000)) if self.depth else frame
@@ -85,8 +86,8 @@ class EpisodeTests(unittest.TestCase):
 
         arm = Arm()
         with tempfile.TemporaryDirectory() as root:
-            store = Episodes(arm, Feed(), Feed(), Feed(depth=True), root)
-            started = store.start("operator", {"task": "Move the cube", "front": "external"})
+            store = Episodes(arm, Feed(jpeg=b"wrist"), Feed(jpeg=b"third"), Feed(depth=True, jpeg=b"d405 rgb"), root)
+            started = store.start("operator", {"task": "Move the cube"})
             identifier = started["active"]["id"]
             current = store.active
             origin = current["origin"]
@@ -98,13 +99,16 @@ class EpisodeTests(unittest.TestCase):
                 tick = origin + index / 5
                 arm.history.append((tick - .02, [(p, 0) for p in joints]))
                 store.capture(current, index, tick)
+            self.assertEqual(store.status()["active"]["media_counts"], {"front": 5, "wrist": 5, "third": 5, "depth": 5})
             store.mark("operator", {"id": identifier, "label": "放置"})
             store.stop("operator", {"id": identifier, "result": "success"})
             detail = store.detail(identifier)
             self.assertIsNone(detail["frames"][0]["action"])
             self.assertEqual(detail["frames"][4]["action"], vector(joints))
             self.assertEqual(detail["frames"][4]["action"][-1], .5)
-            self.assertEqual(detail["frames"][4]["sync_ms"]["third"], detail["frames"][4]["sync_ms"]["depth"])
+            self.assertEqual(detail["frames"][4]["sync_ms"]["front"], detail["frames"][4]["sync_ms"]["depth"])
+            self.assertEqual(detail["metadata"]["camera_roles"],
+                             {"front": "d405", "depth": "d405", "wrist": "wrist", "third": "external"})
             self.assertAlmostEqual(detail["frames"][4]["source_timestamps"]["action"], .05)
             self.assertEqual(detail["annotations"][0]["label"], "放置")
             report = store.review({"id": identifier, "task": "Place the cube", "result": "success",
@@ -130,6 +134,8 @@ class EpisodeTests(unittest.TestCase):
                 self.assertEqual([row["stage"] for row in rows], ["搬运", "搬运", "搬运", None])
                 self.assertEqual(json.loads(archive.read("segments.jsonl"))["label"], "搬运")
                 self.assertEqual(rows[0]["action.normalized"], [0] * 6)
+                self.assertEqual([archive.read(rows[0][f"observation.images.{key}"]) for key in ("front", "wrist", "third")],
+                                 [b"d405 rgb", b"wrist", b"third"])
                 packet = gzip.decompress(archive.read(rows[0]["observation.depth"]))
                 header = int.from_bytes(packet[:4], "little")
                 self.assertEqual(json.loads(packet[4:4 + header])["version"], 1)

@@ -22,6 +22,8 @@ MIN_FREE = 500 * 1024**2
 # Give camera workers time to publish frames already stamped by the sampling tick.
 PUBLISH_DELAY = .075
 MEDIA = {"front": "jpg", "wrist": "jpg", "third": "jpg", "depth": "ndepth.gz"}
+CAMERA_ROLES = {"front": "d405", "depth": "d405", "wrist": "wrist", "third": "external"}
+CAMERA_LABELS = {"front": "D405 RGB", "depth": "D405 深度", "wrist": "腕部 RGB 相机", "third": "第三人称相机"}
 CORE = ("feedback", "front", "wrist")
 DEFAULT_SKEW_MS = 45
 DEFAULT_AGE_MS = 120
@@ -206,9 +208,8 @@ class Episodes:
 
     def start(self, client, data):
         task = self.annotation(data.get("task"), 240, True)
-        front = data.get("front", "d405")
-        if front not in ("external", "d405"):
-            raise ValueError("无效的 Front 相机")
+        if data.get("front", "d405") != "d405":
+            raise ValueError("新 Episode 的 Front 固定为 D405 RGB，请刷新采集页")
         with self.lock:
             if self.active:
                 raise ValueError("已有 Episode 正在采集")
@@ -225,28 +226,30 @@ class Episodes:
                 raise ValueError("请等待腕部、第三人称和 D405 三台相机")
             identifier = uuid4().hex
             metadata = {key: self.annotation(data.get(key), 240) for key in ("objects", "scene", "calibration")}
-            roles = {"front": front, "third": "external" if front == "d405" else "d405",
-                     "wrist": "wrist", "depth": "d405"}
             devices = {"wrist": getattr(self.wrist, "device", None), "external": getattr(self.external, "device", None),
                        "d405": ready[2][3].get("serial")}
-            labels = {"wrist": "腕部相机", "external": "第三人称相机", "d405": "D405"}
-            metadata.update(task=task, camera_roles=roles,
-                            camera_devices={key: devices[role] for key, role in roles.items()},
-                            camera_labels={key: labels[role] for key, role in roles.items()})
+            if devices["wrist"] and devices["external"] and Path(devices["wrist"]).resolve() == Path(devices["external"]).resolve():
+                raise ValueError("腕部与第三人称必须使用不同的相机")
+            metadata.update(task=task, camera_roles=CAMERA_ROLES,
+                            camera_devices={key: devices[role] for key, role in CAMERA_ROLES.items()},
+                            camera_labels=CAMERA_LABELS)
             with self.connect() as db:
                 idx = db.execute("INSERT INTO episodes(id,created,metadata,result) VALUES(?,?,?,?)",
                                  (identifier, time.time(), self.dump(metadata), "recording")).lastrowid - 1
             self.active = {"id": identifier, "episode_index": idx, "client": client, "origin": now,
                            "started": now, "next": 0, "samples": 0, "valid": 0,
-                           "last_sources": {}, "metadata": metadata}
+                           "last_sources": {}, "media_counts": dict.fromkeys(MEDIA, 0), "metadata": metadata}
             self.error = None
         return self.status()
 
     def status(self):
         with self.lock:
             active = self.active
-            return {"active": {key: active[key] for key in ("id", "episode_index", "samples", "valid", "metadata")}
-                    if active else None, "error": self.error}
+            summary = None
+            if active:
+                summary = {key: active[key] for key in ("id", "episode_index", "samples", "valid", "metadata")}
+                summary["media_counts"] = dict(active["media_counts"])
+            return {"active": summary, "error": self.error}
 
     def owned(self, client, identifier):
         if not self.active or self.active["client"] != client or self.active["id"] != identifier:
@@ -295,10 +298,8 @@ class Episodes:
 
     def capture(self, active, index, stamp):
         feedback_frames, command = self.controller_sample(active, stamp)
-        roles = active["metadata"]["camera_roles"]
-        external_role = "front" if roles["front"] == "external" else "third"
         last = active["last_sources"]
-        previous = {**last, "external": last.get(external_role, -math.inf), "d405": last.get("depth", -math.inf)}
+        previous = {**last, "external": last.get("third", -math.inf), "d405": last.get("depth", -math.inf)}
         lookback = stamp - .35
         candidates = {"feedback": feedback_frames, "wrist": self.wrist.samples_between(lookback, stamp),
                       "external": self.external.samples_between(lookback, stamp),
@@ -338,7 +339,7 @@ class Episodes:
 
         (directory / "media").mkdir(parents=True, exist_ok=True)
         for name in ("front", "wrist", "third"):
-            source = sensors[roles[name]]
+            source = sensors[CAMERA_ROLES[name]]
             row[f"observation.images.{name}"] = None
             if source and stamp - source[0] <= .35:
                 save(name, f"observation.images.{name}", source, source[1])
@@ -353,6 +354,9 @@ class Episodes:
         with self.connect() as db:
             db.execute("INSERT INTO frames VALUES(?,?,?)", (active["id"], index, self.dump(row)))
         active["samples"] += 1
+        for channel in active["media_counts"]:
+            if channel in row["sync_ms"]:
+                active["media_counts"][channel] += 1
         span = sync_span(row["sync_ms"], CORE)
         if command and span is not None and span <= DEFAULT_SKEW_MS and all(
             abs(row["sync_ms"][key]) <= DEFAULT_AGE_MS and key not in row["repeated"] for key in CORE
