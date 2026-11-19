@@ -109,7 +109,7 @@ body { background: #fff; }
 .depth-panel .status-label { font-size: 11px; }
 .depth-image { height: 100%; min-height: 0; background: #080e15; cursor: crosshair; }
 .depth-image canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.depth-live-note { position: absolute; bottom: 4px; left: 6px; padding: 2px 4px; color: #fff; background: #111b26c9; font-size: 10px; pointer-events: none; }
+.depth-live-note { position: absolute; bottom: 4px; left: 6px; max-width: calc(100% - 12px); padding: 2px 4px; color: #fff; background: #111b26c9; font-size: 10px; pointer-events: none; }
 .depth-image:fullscreen { width: 100vw; height: 100vh; }
 .depth-floating-reading { display: none; position: absolute; top: 12px; right: 12px; padding: 8px 12px; background: #111b26d9; color: #fff; font: 18px ui-monospace, monospace; pointer-events: none; }
 .depth-image:fullscreen .depth-floating-reading { display: block; }

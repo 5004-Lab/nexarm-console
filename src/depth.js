@@ -4,7 +4,7 @@ import { fillDepthHoles, fillSurfaceHoles } from './depth-fill.js';
 export const depthPanel = `
   <section class="depth-panel panel" id="depth-camera" aria-label="RealSense D405 深度视图">
     <header class="panel-header"><div class="panel-title"><h2>D405 深度</h2><span class="depth-state status-label">连接中</span></div>
-      <div class="views"><button type="button" id="depth-freeze" disabled>冻结</button><button type="button" id="depth-fullscreen">放大</button></div></header>
+      <div class="views"><button type="button" id="depth-relief" aria-label="表面光照增强" aria-pressed="false" title="显示增强：会放大局部深度起伏，不代表真实凹凸">起伏</button><button type="button" id="depth-freeze" disabled>冻结</button><button type="button" id="depth-fullscreen">放大</button></div></header>
     <div class="depth-image visual-frame" tabindex="0" aria-label="深度画面，移动指针查看距离，点击固定测量像素"><canvas hidden></canvas><p class="camera-message">正在连接 RealSense D405…</p><span class="depth-live-note">光轴深度 Z · 非基座坐标</span><output class="depth-floating-reading"></output><button type="button" class="depth-exit">退出全屏</button></div>
     <div class="depth-readout"><div><span id="depth-pixel">中心像素</span><strong id="depth-value">— mm</strong></div><span id="depth-quality">等待原始深度</span></div>
     <div class="depth-scale"><label>显示<select id="depth-mode" aria-label="深度处理模式"><option value="scene" selected>场景补洞（推算）</option><option value="complete">稳健补洞</option><option value="enhanced">保边滤波</option><option value="raw">原始深度</option></select></label><label>标尺<select id="depth-range" aria-label="深度显示范围"><option value="auto" selected>自动近景</option><option value="50,500">50–500 mm</option><option value="50,1000">50–1000 mm</option><option value="50,3000">50–3000 mm</option></select></label><div class="depth-color-key"><div class="depth-gradient"></div><span><b id="depth-near">50 mm</b><b id="depth-far">1000 mm</b></span></div></div>
@@ -41,15 +41,17 @@ export function createDepth(panel) {
     if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
     const [near, far] = $('#depth-range').value === 'auto' ? autoRange || [50, 1000] : $('#depth-range').value.split(',').map(Number);
     const enhanced = $('#depth-mode').value !== 'raw' && frame.filtered;
+    const relief = Boolean(enhanced) && $('#depth-relief').getAttribute('aria-pressed') === 'true';
+    $('#depth-relief').disabled = !enhanced;
     const scene = enhanced && $('#depth-mode').value === 'scene';
     const complete = enhanced && $('#depth-mode').value === 'complete';
     if (complete && !completed) completed = fillDepthHoles(frame.filtered, width, height, frame.meta.depth_scale_m);
     if (scene && !surface) surface = fillSurfaceHoles(frame.filtered, width, height, frame.meta.depth_scale_m);
     const displayPixels = scene ? surface.pixels : complete ? completed.pixels : enhanced ? frame.filtered : frame.pixels;
-    $('.depth-live-note').textContent = `${frozen ? `冻结 ${new Date(frame.meta.captured_at_ms).toLocaleTimeString()} · ` : ''}${scene ? '场景补洞含推算 · 读数仍取原始 Z' : complete ? '双向约束补洞 · 测距取原始 Z' : enhanced ? '保边/时域滤波 · 读数取原始 Z' : '原始深度 · 光轴 Z'}`;
+    $('.depth-live-note').textContent = `${frozen ? `冻结 ${new Date(frame.meta.captured_at_ms).toLocaleTimeString()} · ` : ''}${scene ? '场景补洞含推算 · 读数仍取原始 Z' : complete ? '双向约束补洞 · 测距取原始 Z' : enhanced ? '保边/时域滤波 · 读数取原始 Z' : '原始深度 · 光轴 Z'}${relief ? ' · 光照起伏仅为显示增强' : ''}`;
     $('#depth-quality').textContent = `原始有效 ${frame.meta.valid_percent}%${scene || complete ? ` · 新增补全 ${scene ? surface.filledCount : completed.filledCount} 点` : ''}`;
     $('#depth-near').textContent = `${near} mm`; $('#depth-far').textContent = `${far} mm`;
-    if (!background) background = new ImageData(colorizeDepth({ ...frame, pixels: displayPixels }, near, far, { shade: Boolean(enhanced) }), width, height);
+    if (!background) background = new ImageData(colorizeDepth({ ...frame, pixels: displayPixels }, near, far, { shade: relief }), width, height);
     context.putImageData(background, 0, 0);
     if (!pixel || pixel[0] >= width || pixel[1] >= height) pixel = [Math.floor(width / 2), Math.floor(height / 2)];
     const [x, y] = pixel;
@@ -111,6 +113,11 @@ export function createDepth(panel) {
   $('#depth-unpin').onclick = () => { pinned = false; reading(); };
   $('#depth-range').onchange = () => { background = null; draw(); };
   $('#depth-mode').onchange = () => { background = null; draw(); };
+  $('#depth-relief').onclick = () => {
+    const button = $('#depth-relief');
+    button.setAttribute('aria-pressed', String(button.getAttribute('aria-pressed') !== 'true'));
+    background = null; draw();
+  };
   $('#depth-fullscreen').onclick = () => image.requestFullscreen();
   $('.depth-exit').onclick = event => { event.stopPropagation(); document.exitFullscreen(); };
   freeze.onclick = () => {
