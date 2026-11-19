@@ -1,4 +1,5 @@
 import { parseDepthPacket, depthMm, imagePixel, colorizeDepth, depthPng, depthColors } from './depth-data.js';
+import { fillDepthHoles, fillSurfaceHoles } from './depth-fill.js';
 
 export const depthPanel = `
   <section class="depth-panel panel" id="depth-camera" aria-label="RealSense D405 深度视图">
@@ -6,7 +7,7 @@ export const depthPanel = `
       <div class="views"><button type="button" id="depth-freeze" disabled>冻结</button><button type="button" id="depth-fullscreen">放大</button></div></header>
     <div class="depth-image visual-frame" tabindex="0" aria-label="深度画面，移动指针查看距离，点击固定测量像素"><canvas hidden></canvas><p class="camera-message">正在连接 RealSense D405…</p><span class="depth-live-note">光轴深度 Z · 非基座坐标</span><output class="depth-floating-reading"></output><button type="button" class="depth-exit">退出全屏</button></div>
     <div class="depth-readout"><div><span id="depth-pixel">中心像素</span><strong id="depth-value">— mm</strong></div><span id="depth-quality">等待原始深度</span></div>
-    <div class="depth-scale"><label>显示<select id="depth-mode" aria-label="深度处理模式"><option value="enhanced" selected>增强滤波</option><option value="raw">原始深度</option></select></label><label>标尺<select id="depth-range" aria-label="深度显示范围"><option value="auto" selected>自动近景</option><option value="50,500">50–500 mm</option><option value="50,1000">50–1000 mm</option><option value="50,3000">50–3000 mm</option></select></label><div class="depth-color-key"><div class="depth-gradient"></div><span><b id="depth-near">50 mm</b><b id="depth-far">1000 mm</b></span></div></div>
+    <div class="depth-scale"><label>显示<select id="depth-mode" aria-label="深度处理模式"><option value="scene" selected>场景补洞（推算）</option><option value="complete">稳健补洞</option><option value="enhanced">保边滤波</option><option value="raw">原始深度</option></select></label><label>标尺<select id="depth-range" aria-label="深度显示范围"><option value="auto" selected>自动近景</option><option value="50,500">50–500 mm</option><option value="50,1000">50–1000 mm</option><option value="50,3000">50–3000 mm</option></select></label><div class="depth-color-key"><div class="depth-gradient"></div><span><b id="depth-near">50 mm</b><b id="depth-far">1000 mm</b></span></div></div>
     <footer class="view-footer depth-footer"><span id="depth-details">黑：无效 · 灰：标尺外</span><div class="camera-tools"><button type="button" id="depth-unpin">跟随指针</button><button type="button" id="depth-download" disabled>16位原图 ↓</button></div></footer>
   </section>`;
 
@@ -17,13 +18,19 @@ export function createDepth(panel) {
   const freeze = $('#depth-freeze'), download = $('#depth-download');
   let frame = null, after = 0, active = true, frozen = false, pinned = false, pixel = null, background = null;
   let autoRange = null;
+  let completed = null;
+  let surface = null;
   let rateStart = performance.now(), frames = 0, rate = null;
   $('.depth-gradient').style.background = `linear-gradient(to right, ${depthColors.map(color => `rgb(${color.join(',')})`).join(',')})`;
 
   function reading() {
     const value = frame && pixel ? depthMm(frame, ...pixel) : null;
+    const index = frame && pixel ? pixel[1] * frame.meta.width + pixel[0] : -1;
+    const source = $('#depth-mode').value === 'scene' ? surface?.pixels : $('#depth-mode').value === 'complete' ? completed?.pixels : $('#depth-mode').value === 'enhanced' ? frame?.filtered : null;
+    const inferred = value === null && index >= 0 && source?.[index] > 0;
     $('#depth-pixel').textContent = pixel ? `${pinned ? '固定' : '像素'} (${pixel.join(', ')})` : '中心像素';
-    $('#depth-value').textContent = value === null ? '原始深度无效' : `${value.toFixed(1)} mm`;
+    $('#depth-value').textContent = value === null ? inferred ? '补全区 · 无实测' : '原始深度无效' : `${value.toFixed(1)} mm`;
+    $('#depth-value').title = inferred ? '此处仅为预览插值，原始深度为 0，没有实测距离' : '原始光轴深度 Z';
     $('#depth-value').dataset.valid = String(value !== null);
     $('.depth-floating-reading').textContent = `${$('#depth-pixel').textContent} · ${$('#depth-value').textContent}`;
     $('#depth-unpin').disabled = !pinned;
@@ -33,10 +40,16 @@ export function createDepth(panel) {
     const { width, height } = frame.meta;
     if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
     const [near, far] = $('#depth-range').value === 'auto' ? autoRange || [50, 1000] : $('#depth-range').value.split(',').map(Number);
-    const enhanced = $('#depth-mode').value === 'enhanced' && frame.filtered;
-    $('.depth-live-note').textContent = `${frozen ? `冻结 ${new Date(frame.meta.captured_at_ms).toLocaleTimeString()} · ` : ''}${enhanced ? '保边/时域滤波 · 读数取原始 Z' : '原始深度 · 光轴 Z'}`;
+    const enhanced = $('#depth-mode').value !== 'raw' && frame.filtered;
+    const scene = enhanced && $('#depth-mode').value === 'scene';
+    const complete = enhanced && $('#depth-mode').value === 'complete';
+    if (complete && !completed) completed = fillDepthHoles(frame.filtered, width, height, frame.meta.depth_scale_m);
+    if (scene && !surface) surface = fillSurfaceHoles(frame.filtered, width, height, frame.meta.depth_scale_m);
+    const displayPixels = scene ? surface.pixels : complete ? completed.pixels : enhanced ? frame.filtered : frame.pixels;
+    $('.depth-live-note').textContent = `${frozen ? `冻结 ${new Date(frame.meta.captured_at_ms).toLocaleTimeString()} · ` : ''}${scene ? '场景补洞含推算 · 读数仍取原始 Z' : complete ? '双向约束补洞 · 测距取原始 Z' : enhanced ? '保边/时域滤波 · 读数取原始 Z' : '原始深度 · 光轴 Z'}`;
+    $('#depth-quality').textContent = `原始有效 ${frame.meta.valid_percent}%${scene || complete ? ` · 新增补全 ${scene ? surface.filledCount : completed.filledCount} 点` : ''}`;
     $('#depth-near').textContent = `${near} mm`; $('#depth-far').textContent = `${far} mm`;
-    if (!background) background = new ImageData(colorizeDepth(enhanced ? { ...frame, pixels: frame.filtered } : frame, near, far, { shade: Boolean(enhanced) }), width, height);
+    if (!background) background = new ImageData(colorizeDepth({ ...frame, pixels: displayPixels }, near, far, { shade: Boolean(enhanced) }), width, height);
     context.putImageData(background, 0, 0);
     if (!pixel || pixel[0] >= width || pixel[1] >= height) pixel = [Math.floor(width / 2), Math.floor(height / 2)];
     const [x, y] = pixel;
@@ -46,7 +59,7 @@ export function createDepth(panel) {
     reading();
   }
   function lost(status) {
-    frame = null; pixel = null; pinned = false; after = 0; canvas.hidden = true;
+    frame = null; completed = null; surface = null; pixel = null; pinned = false; after = 0; canvas.hidden = true;
     $('#depth-unpin').disabled = true;
     freeze.disabled = true; download.disabled = true; badge.textContent = status === 'missing' ? '未连接' : '等待深度';
     message.textContent = ({ missing: '未检测到 D405，请检查 USB 连接', unsupported: '深度采集组件未安装',
@@ -64,7 +77,7 @@ export function createDepth(panel) {
       if (response.status === 200) {
         const next = parseDepthPacket(await response.arrayBuffer());
         if (!active || frozen) return;
-        frame = next; background = null; after = frame.meta.stamp;
+        frame = next; background = null; completed = null; surface = null; after = frame.meta.stamp;
         const estimate = frame.meta.suggested_range_mm;
         if (Array.isArray(estimate) && estimate.length === 2 && estimate.every(Number.isFinite) && estimate[1] > estimate[0]) {
           autoRange = autoRange ? autoRange.map((value, i) => value * .88 + estimate[i] * .12) : estimate;

@@ -100,6 +100,7 @@ body { background: #fff; }
 .sensor-dock #realsense-camera, .sensor-dock #wrist-camera { border-right: 1px solid var(--line); }
 .depth-controls { grid-area: tools; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; border-top: 1px solid var(--line); align-items: center; padding: 0 4px; }
 .depth-controls .depth-readout { border-top: 0; }
+.depth-controls #depth-quality { white-space: normal; text-align: right; }
 .depth-panel { display: grid; grid-template-rows: 41px minmax(0,1fr) 37px; min-height: 0; }
 .depth-panel .panel-header { height: 41px; padding: 5px 8px; }
 .depth-panel h2 { font-size: 14px; }
