@@ -50,11 +50,15 @@ class CameraFeed:
             return min((frame for frame in self.frames if frame[0] > after),
                        key=lambda frame: abs(frame[0] - stamp), default=None)
 
-    def sample_at(self, stamp):
+    def samples_between(self, first, last):
         with self.lock:
             if self.state != "live":
-                return None
-            return next((frame for frame in reversed(self.frames) if frame[0] <= stamp), None)
+                return []
+            return [frame for frame in self.frames if first <= frame[0] <= last]
+
+    def sample_at(self, stamp):
+        frames = self.samples_between(stamp - .35, stamp)
+        return frames[-1] if frames else None
 
     def update_state(self, state):
         with self.lock:

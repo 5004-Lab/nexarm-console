@@ -66,6 +66,7 @@ const axis = {
 };
 const base = { animation: false, backgroundColor: '#fff', textStyle, color: gem };
 const tip = { renderMode: 'richText', confine: true, borderColor: '#acb4bd', borderWidth: 1, backgroundColor: '#fff', textStyle };
+export const matlabStyle = { base, grid, axis, textStyle, tip, colors: [...gem, '#A2142F'] };
 
 function rounded(value) {
   const number = Math.round(value * 10) / 10;

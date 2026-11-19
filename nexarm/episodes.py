@@ -23,6 +23,8 @@ MIN_FREE = 500 * 1024**2
 PUBLISH_DELAY = .075
 MEDIA = {"front": "jpg", "wrist": "jpg", "third": "jpg", "depth": "ndepth.gz"}
 CORE = ("feedback", "front", "wrist")
+DEFAULT_SKEW_MS = 45
+DEFAULT_AGE_MS = 120
 AXES = ["J1", "J2", "J3", "J4", "J5", "gripper"]
 SCHEMA = "nexarm-multimodal/1"
 
@@ -42,26 +44,75 @@ def stats(rows, field):
     return {"mean": means, "std": deviations, "count": len(rows)}
 
 
-def prepare(rows, settings):
+def valid_vector(value):
+    return isinstance(value, list) and len(value) == len(AXES) and all(
+        type(x) in (int, float) and math.isfinite(x) for x in value
+    )
+
+
+def sync_span(offsets, required):
+    if not all(key in offsets for key in required):
+        return None
+    values = [offsets[key] for key in required]
+    return round(max(values) - min(values), 2)
+
+
+def align_sources(sources, previous, tick):
+    """Find the shortest window covering fresh samples of every observation source."""
+    eligible = {
+        key: [sample for sample in frames
+              if tick - DEFAULT_AGE_MS / 1000 <= sample[0] <= tick and sample[0] > previous.get(key, -math.inf)]
+        for key, frames in sources.items()
+    }
+    if all(eligible.values()):
+        best, score = None, (math.inf, math.inf)
+        starts = sorted({sample[0] for frames in eligible.values() for sample in frames})
+        for start in starts:
+            group = {key: next((frame for frame in frames if frame[0] >= start), None)
+                     for key, frames in eligible.items()}
+            if not all(group.values()):
+                break
+            stamps = [frame[0] for frame in group.values()]
+            candidate = (max(stamps) - min(stamps), tick - min(stamps))
+            if candidate < score:
+                best, score = group, candidate
+        if best:
+            return best
+    # Retain available raw media for review when the complete window is unavailable.
+    feedback = sources["feedback"][-1] if sources["feedback"] else None
+    anchor = feedback[0] if feedback else tick
+    return {key: min(reversed(frames), key=lambda frame: abs(frame[0] - anchor), default=None)
+            for key, frames in sources.items()}
+
+
+def prepare(rows, settings, exclusions=()):
     """Filter without modifying source rows or joining samples across gaps."""
     required = set(CORE)
     required.update(key for key in ("third", "depth") if settings[key])
     tolerance = settings["max_skew_ms"]
+    max_age = settings.get("max_age_ms", tolerance)
+    excluded = {i for segment in exclusions for i in range(segment["first"], segment["last"] + 1)}
     reasons, runs, run, previous = Counter(), [], [], None
-    decisions = []
+    decisions, spans = [], []
     for i, row in enumerate(rows):
         index = row["frame_index"]
         offsets = row["sync_ms"]
         bad = []
         if not settings["first"] <= index <= settings["last"]:
             bad.append("trim")
+        if index in excluded:
+            bad.append("manual_exclude")
         if row["action"] is None:
             bad.append("no_action")
+        elif not valid_vector(row["action"]):
+            bad.append("invalid_action")
+        if "feedback" in offsets and not valid_vector(row["observation.state"]):
+            bad.append("invalid_feedback")
         if 0 < i < len(rows) - 1:
             before, after = rows[i - 1], rows[i + 1]
             if before["frame_index"] + 1 == index == after["frame_index"] - 1:
                 values = [sample["observation.state"] for sample in (before, row, after)]
-                if all(value is not None for value in values) and any(
+                if all(valid_vector(value) for value in values) and any(
                     abs(a - c) < 5 and min(abs(a - b), abs(b - c)) > 20
                     for a, b, c in zip(*(value[:5] for value in values))
                 ):
@@ -69,22 +120,24 @@ def prepare(rows, settings):
         for key in sorted(required):
             if key not in offsets:
                 bad.append("missing_" + key)
-            elif abs(offsets[key]) > tolerance:
+            elif offsets[key] > .01 or abs(offsets[key]) > max_age:
                 bad.append("skew_" + key)
             elif key in row["repeated"]:
                 bad.append("repeat_" + key)
-        if settings["depth"] and not row.get("depth_valid_percent"):
+        if settings["depth"] and "depth" in offsets and (row.get("depth_valid_percent") or 0) < settings.get("min_depth_percent", 1):
             bad.append("empty_depth")
-        values = [offsets[key] for key in required if key in offsets]
-        if values and max(values) - min(values) > tolerance:
+        span = sync_span(offsets, required)
+        if span is not None and span > tolerance:
             bad.append("sensor_span")
+        if span is not None and "trim" not in bad:
+            spans.append(span)
         if run and (bad or index != previous + 1):
             runs.append(run)
             run = []
         if not bad:
             run.append(row)
         previous = index
-        decisions.append({"frame_index": index, "reasons": bad})
+        decisions.append({"frame_index": index, "reasons": bad, "span_ms": span})
         reasons.update(bad)
     if run:
         runs.append(run)
@@ -101,7 +154,12 @@ def prepare(rows, settings):
             decision["reasons"].append("short_clip")
     summary = {"settings": settings, "clips": clips, "accepted": len(accepted), "total": len(rows),
                "rejected_reasons": dict(reasons), "decisions": decisions,
+               "skipped_ticks": sum(max(0, b["frame_index"] - a["frame_index"] - 1) for a, b in zip(rows, rows[1:])),
                "normalization": {key: stats(accepted, key) for key in ("observation.state", "action")} if accepted else None}
+    if spans:
+        spans.sort()
+        summary["sync"] = {"p50_ms": spans[math.ceil(len(spans) * .5) - 1],
+                           "p95_ms": spans[math.ceil(len(spans) * .95) - 1], "max_ms": spans[-1]}
     return summary
 
 
@@ -125,6 +183,10 @@ class Episodes:
                     id TEXT, frame INTEGER, payload TEXT, PRIMARY KEY(id,frame));
                 CREATE TABLE IF NOT EXISTS annotations (
                     id TEXT, timestamp REAL, label TEXT);
+                CREATE TABLE IF NOT EXISTS segments (
+                    id TEXT NOT NULL, episode TEXT NOT NULL, kind TEXT NOT NULL,
+                    first INTEGER NOT NULL, last INTEGER NOT NULL, label TEXT NOT NULL,
+                    PRIMARY KEY(episode,id));
             """)
             db.execute("UPDATE episodes SET ended=?, result='interrupted' WHERE ended IS NULL", (time.time(),))
 
@@ -221,23 +283,28 @@ class Episodes:
     def controller_sample(self, active, stamp):
         arm = self.controller
         with arm.lock:
-            sample = None
+            feedback = []
             if arm.feedback_ok(time.monotonic()):
-                sample = next((item for item in reversed(arm.history) if item[0] <= stamp), None)
+                feedback = [item for item in arm.history if stamp - .35 <= item[0] <= stamp]
             command = None
             if (arm.owner == active["client"] and arm.owner_since <= stamp <= arm.lease_end
                     and arm.board is None and arm.feedback_ok(time.monotonic())):
                 since = max(active["origin"], arm.owner_since)
                 command = next((item for item in reversed(arm.commands) if since <= item[0] <= stamp), None)
-        return sample, command
+        return feedback, command
 
     def capture(self, active, index, stamp):
-        feedback, command = self.controller_sample(active, stamp)
-        wrist = self.wrist.sample_at(stamp)
-        external = self.external.sample_at(stamp)
-        d405 = self.depth.sample_at(stamp)
-        sensors = {"wrist": wrist, "external": external, "d405": d405}
+        feedback_frames, command = self.controller_sample(active, stamp)
         roles = active["metadata"]["camera_roles"]
+        external_role = "front" if roles["front"] == "external" else "third"
+        last = active["last_sources"]
+        previous = {**last, "external": last.get(external_role, -math.inf), "d405": last.get("depth", -math.inf)}
+        lookback = stamp - .35
+        candidates = {"feedback": feedback_frames, "wrist": self.wrist.samples_between(lookback, stamp),
+                      "external": self.external.samples_between(lookback, stamp),
+                      "d405": self.depth.samples_between(lookback, stamp)}
+        sensors = align_sources(candidates, previous, stamp)
+        feedback, d405 = sensors["feedback"], sensors["d405"]
         row = {"episode_index": active["episode_index"], "frame_index": index, "timestamp": index / FPS,
                "task": active["metadata"]["task"], "observation.state": None, "action": None,
                "feedback_encoder": None, "command_encoder": None, "source_timestamps": {}, "sync_ms": {},
@@ -249,9 +316,10 @@ class Episodes:
             if key == "action":
                 return
             row["sync_ms"][key] = round((measured - stamp) * 1000, 2)
-            if active["last_sources"].get(key) == measured:
+            if measured <= active["last_sources"].get(key, -math.inf):
                 row["repeated"].append(key)
-            active["last_sources"][key] = measured
+            else:
+                active["last_sources"][key] = measured
 
         if feedback and stamp - feedback[0] <= .35:
             track("feedback", feedback[0])
@@ -285,7 +353,10 @@ class Episodes:
         with self.connect() as db:
             db.execute("INSERT INTO frames VALUES(?,?,?)", (active["id"], index, self.dump(row)))
         active["samples"] += 1
-        if command and all(abs(row["sync_ms"].get(key, 1e6)) <= 180 and key not in row["repeated"] for key in CORE):
+        span = sync_span(row["sync_ms"], CORE)
+        if command and span is not None and span <= DEFAULT_SKEW_MS and all(
+            abs(row["sync_ms"][key]) <= DEFAULT_AGE_MS and key not in row["repeated"] for key in CORE
+        ):
             active["valid"] += 1
 
     def run(self):
@@ -331,6 +402,7 @@ class Episodes:
     def detail(self, identifier):
         History.identifier(identifier)
         with self.connect() as db:
+            db.execute("BEGIN")
             entry = db.execute("SELECT id,idx,created,metadata,result,ended,0,review FROM episodes WHERE id=?",
                                (identifier,)).fetchone()
             if not entry:
@@ -338,8 +410,60 @@ class Episodes:
             rows = [json.loads(r[0]) for r in db.execute("SELECT payload FROM frames WHERE id=? ORDER BY frame", (identifier,))]
             events = [{"timestamp": t, "label": label} for t, label in db.execute(
                 "SELECT timestamp,label FROM annotations WHERE id=? ORDER BY timestamp", (identifier,))]
+            segments = self.segments(db, identifier)
         return {**self.summary(entry), "samples": len(rows), "fps": FPS,
-                "frames": rows, "annotations": events, "review": json.loads(entry[7]) if entry[7] else None}
+                "frames": rows, "annotations": events, "segments": segments,
+                "review": json.loads(entry[7]) if entry[7] else None}
+
+    @staticmethod
+    def segments(db, identifier):
+        rows = db.execute("""SELECT s.id,s.kind,s.first,s.last,s.label,a.payload,b.payload FROM segments s
+                             JOIN frames a ON a.id=s.episode AND a.frame=s.first
+                             JOIN frames b ON b.id=s.episode AND b.frame=s.last
+                             WHERE s.episode=? ORDER BY s.first,s.last,s.id""", (identifier,))
+        return [dict(id=key, kind=kind, first=first, last=last, label=label,
+                     start_timestamp=json.loads(a)["timestamp"], end_timestamp=json.loads(b)["timestamp"])
+                for key, kind, first, last, label, a, b in rows]
+
+    def edit_segment(self, data):
+        identifier = History.identifier(data.get("id"))
+        segment = data.get("segment")
+        if segment is not None:
+            History.identifier(segment)
+        with self.lock, self.connect() as db:
+            entry = db.execute("SELECT ended,review FROM episodes WHERE id=?", (identifier,)).fetchone()
+            if not entry or not entry[0]:
+                raise ValueError("请先结束采集")
+            old = db.execute("SELECT kind FROM segments WHERE episode=? AND id=?", (identifier, segment)).fetchone()
+            if segment is not None and not old:
+                raise ValueError("片段不存在")
+            changed_exclusions = bool(old and old[0] == "exclude")
+            if data.get("remove") is True:
+                if not old:
+                    raise ValueError("请选择要删除的片段")
+                db.execute("DELETE FROM segments WHERE episode=? AND id=?", (identifier, segment))
+            else:
+                first, last = data.get("first"), data.get("last")
+                label = self.annotation(data.get("label"), 120, True)
+                kind = data.get("kind")
+                if kind not in ("stage", "exclude") or type(first) is not int or type(last) is not int or first > last:
+                    raise ValueError("请选择有效的起点和终点")
+                bounds = db.execute("SELECT COUNT(*) FROM frames WHERE id=? AND frame IN (?,?)",
+                                    (identifier, first, last)).fetchone()[0]
+                if bounds != len({first, last}):
+                    raise ValueError("起点和终点必须对应已保存的帧")
+                overlaps = db.execute("""SELECT label FROM segments WHERE episode=? AND kind=? AND id<>?
+                                         AND first<=? AND last>=? LIMIT 1""",
+                                      (identifier, kind, segment or "", last, first)).fetchone()
+                if overlaps:
+                    raise ValueError(f"与「{overlaps[0]}」重叠，请调整起止帧")
+                db.execute("INSERT OR REPLACE INTO segments VALUES(?,?,?,?,?,?)",
+                           (segment or uuid4().hex, identifier, kind, first, last, label))
+                changed_exclusions |= kind == "exclude"
+            if changed_exclusions:
+                db.execute("UPDATE episodes SET review=NULL WHERE id=?", (identifier,))
+            return {"segments": self.segments(db, identifier),
+                    "review": json.loads(entry[1]) if entry[1] and not changed_exclusions else None}
 
     def review(self, data):
         detail = self.detail(data.get("id"))
@@ -351,15 +475,20 @@ class Episodes:
             raise ValueError("无效的 Episode 结果")
         first, last = data.get("first"), data.get("last")
         tolerance, minimum = data.get("max_skew_ms"), data.get("min_frames")
-        if (not detail["frames"] or any(type(x) is not int for x in (first, last, tolerance, minimum))
+        max_age = data.get("max_age_ms", tolerance)
+        depth_floor = data.get("min_depth_percent", 1)
+        if (not detail["frames"] or any(type(x) is not int for x in (first, last, tolerance, minimum, max_age, depth_floor))
                 or not 0 <= first <= last <= detail["frames"][-1]["frame_index"]
-                or not 60 <= tolerance <= 350 or not 2 <= minimum <= 300):
-            raise ValueError("检查裁剪范围、同步阈值和最短片段")
+                or not 5 <= tolerance <= 350 or not 10 <= max_age <= 350
+                or not 1 <= depth_floor <= 100 or not 2 <= minimum <= 300):
+            raise ValueError("请检查裁剪、时差、源帧时效、深度覆盖率和最短片段")
         settings = {"first": first, "last": last, "max_skew_ms": tolerance, "min_frames": minimum,
+                    "max_age_ms": max_age, "min_depth_percent": depth_floor,
                     "third": data.get("third") is True, "depth": data.get("depth") is True}
-        review = prepare(detail["frames"], settings)
         metadata = {**detail["metadata"], "reviewed_task": task}
-        with self.connect() as db:
+        with self.lock, self.connect() as db:
+            exclusions = [s for s in self.segments(db, detail["id"]) if s["kind"] == "exclude"]
+            review = prepare(detail["frames"], settings, exclusions)
             db.execute("UPDATE episodes SET metadata=?,result=?,review=? WHERE id=?",
                        (self.dump(metadata), result, self.dump(review), detail["id"]))
         return review
@@ -399,8 +528,12 @@ class Episodes:
         with ZipFile(target, "w", compression=ZIP_STORED) as output:
             output.writestr("manifest.json", self.dump(manifest))
             output.writestr("events.jsonl", "".join(self.dump(event) + "\n" for event in detail["annotations"]))
+            output.writestr("segments.jsonl", "".join(self.dump(segment) + "\n" for segment in detail["segments"]))
+            stage_by_frame = {index: s["label"] for s in detail["segments"] if s["kind"] == "stage"
+                              for index in range(s["first"], s["last"] + 1)}
             with output.open("frames.jsonl", "w", force_zip64=True) as stream:
                 for row in rows:
+                    row = dict(row, stage=stage_by_frame.get(row["frame_index"]))
                     if normal:
                         row = dict(row, task=metadata.get("reviewed_task", row["task"]))
                         for key in ("observation.state", "action"):

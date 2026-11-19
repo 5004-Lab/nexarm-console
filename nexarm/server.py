@@ -1084,6 +1084,8 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
                     result = episodes.stop(client, data)
                 elif action == "episode-mark" and episodes:
                     result = episodes.mark(client, data)
+                elif action == "episode-segment" and episodes:
+                    result = episodes.edit_segment(data)
                 elif action == "episode-review" and episodes:
                     result = episodes.review(data)
                 elif action == "observation-start" and history:

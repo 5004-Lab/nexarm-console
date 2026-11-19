@@ -6,8 +6,7 @@ import { createCamera } from './camera.js';
 import { createDepth, depthPanel } from './depth.js';
 import { createWorkspace } from './workspace.js';
 import { chart, createTelemetry, jointRangeTable } from './telemetry.js';
-import { capturePage, createCapture } from './capture.js';
-import { historyToolbar, observationForm, createHistory } from './history.js';
+import { historyToolbar, createHistory } from './history.js';
 import { episodePage, createEpisodes } from './episodes.js';
 import workcell from './workcell.json';
 import { jointAngle, jointPosition, angleSpeed } from './joint-units.js';
@@ -152,7 +151,7 @@ ${historyToolbar}
     <div class="chart-grid geometry-grid">${chart('range')}${chart('workspace')}</div>
     <section class="operation-events"><header class="section-heading"><h2>操作阶段与事件</h2></header><table><thead><tr><th>记录时间</th><th>事件 / 阶段标注</th></tr></thead><tbody id="operation-events"></tbody></table></section>
   </div>
-  <div class="work-page" id="page-capture" hidden>${episodePage}<details class="automated-capture"><summary>旧版双视角采集</summary>${observationForm}</details><details class="automated-capture"><summary>动作组重复采集（腕部单视角）与 LeRobot 导出</summary>${capturePage}</details></div>
+  <div class="work-page" id="page-capture" hidden>${episodePage}</div>
   <div class="work-page" id="page-actions" hidden>
     <div class="page-heading"><h1>动作组与调试</h1><span>单轴点动 · 动作序列 · 串口日志</span></div>
     <p id="action-notice" class="notice" role="status"></p>
@@ -260,11 +259,9 @@ const twin = createTwin($('#canvas-host'), message => {
 });
 
 const telemetry = createTelemetry();
-createHistory(telemetry, twin, api, () => Boolean(state.remote_view));
-const capture = createCapture(api, () => liveControl() && !busy, () => frames, () => Boolean(state.remote_view));
+createHistory(telemetry, twin);
 const camera = createCamera($('#wrist-camera'), feedback => twin.update(feedback), frame => {
   telemetry.camera(frame.stamp, frame.skew);
-  capture.frame(frame);
 });
 createCamera($('#external-camera'), () => {}, () => {}, { endpoint: '/api/camera/external', syncPose: false });
 createCamera($('#realsense-camera'), () => {}, () => {}, { endpoint: '/api/camera/realsense', syncPose: false, name: 'D405 RGB 相机' });
@@ -284,7 +281,6 @@ function showPage() {
     else link.removeAttribute('aria-current');
   }
   if (activePage === 'capture') {
-    capture.refresh();
     episodes.refresh();
   } else {
     episodes.pause();
@@ -663,7 +659,6 @@ function render() {
     (!state.armed && !state.task && !state.moving && state.board == null));
   workspace.update(state);
   telemetry.update(state);
-  capture.render(state);
   disable(['run'], !enabled || !frames.length);
   disable(['download'], !maintenance || !frames.length);
   disable(['load', 'frame-time'], !editing);

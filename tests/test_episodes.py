@@ -11,7 +11,8 @@ from zipfile import ZipFile
 
 import numpy as np
 
-from nexarm.episodes import Episodes, prepare, vector
+from nexarm.episodes import Episodes, align_sources, prepare, vector
+from nexarm.camera_feed import CameraFeed
 
 
 def sample(index, action=True, **fields):
@@ -22,6 +23,32 @@ def sample(index, action=True, **fields):
 
 
 class EpisodeTests(unittest.TestCase):
+    def test_camera_alignment_selects_near_feedback_without_using_future_frames(self):
+        camera = CameraFeed(None)
+        camera.state = "live"
+        camera.frames.extend((stamp, bytes([index])) for index, stamp in enumerate((1.01, 1.06, 1.10)))
+        self.assertEqual(camera.sample_at(1.09)[0], 1.06)
+        self.assertEqual([frame[0] for frame in camera.samples_between(1, 1.09)], [1.01, 1.06])
+        sources = {"feedback": [(1.02,), (1.08,)], "wrist": [(1.01,), (1.055,)],
+                   "external": [(1.01,), (1.06,)], "d405": [(1.03,), (1.095,)]}
+        matched = align_sources(sources, {}, 1.1)
+        self.assertEqual({key: entry[0] for key, entry in matched.items()},
+                         {"feedback": 1.02, "wrist": 1.01, "external": 1.01, "d405": 1.03})
+        self.assertEqual(align_sources(sources, {"wrist": 1.01}, 1.1)["wrist"], (1.055,))
+
+    def test_sync_threshold_distinguishes_span_from_age_and_manual_exclusions(self):
+        rows = [sample(i) for i in range(8)]
+        rows[1]["sync_ms"]["depth"] = -90
+        rows[2]["sync_ms"] = dict.fromkeys(rows[2]["sync_ms"], -125)
+        result = prepare(rows, {"first": 0, "last": 7, "max_skew_ms": 25, "max_age_ms": 120,
+                                "min_frames": 2, "third": True, "depth": True},
+                         exclusions=[{"first": 5, "last": 5}])
+        self.assertEqual([(c["first"], c["last"]) for c in result["clips"]], [(3, 4), (6, 7)])
+        self.assertEqual(result["decisions"][1]["reasons"], ["sensor_span"])
+        self.assertIn("skew_depth", result["decisions"][2]["reasons"])
+        self.assertEqual(result["decisions"][5]["reasons"], ["manual_exclude"])
+        self.assertEqual(result["sync"]["p95_ms"], 60)
+
     def test_cleaning_splits_gaps_and_does_not_invent_actions_or_bridge_spikes(self):
         rows = [sample(i, action=i != 3) for i in (0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12)]
         rows[-3]["observation.state"] = [80.0] * 6
@@ -53,6 +80,9 @@ class EpisodeTests(unittest.TestCase):
                 return (*frame, pixels, dict(width=2, height=2, depth_scale_m=.0001,
                                              valid_percent=75, captured_at_ms=1000)) if self.depth else frame
 
+            def samples_between(self, first, last):
+                return [self.sample_at(last)]
+
         arm = Arm()
         with tempfile.TemporaryDirectory() as root:
             store = Episodes(arm, Feed(), Feed(), Feed(depth=True), root)
@@ -81,12 +111,24 @@ class EpisodeTests(unittest.TestCase):
                                    "first": 0, "last": 4, "max_skew_ms": 100, "min_frames": 2,
                                    "third": True, "depth": True})
             self.assertEqual(report["accepted"], 4)
+            segment_data = {"id": identifier, "kind": "stage", "first": 1, "last": 3, "label": "接近"}
+            saved = store.edit_segment(segment_data)
+            segment = saved["segments"][0]
+            self.assertEqual(segment["start_timestamp"], .2)
+            self.assertEqual(segment["end_timestamp"], .6)
+            with self.assertRaisesRegex(ValueError, "重叠"):
+                store.edit_segment({**segment_data, "first": 3, "last": 4, "label": "夹取"})
+            with self.assertRaisesRegex(ValueError, "已保存的帧"):
+                store.edit_segment({**segment_data, "first": 4, "last": 9})
+            store.edit_segment({**segment_data, "segment": segment["id"], "label": "搬运"})
             stream = io.BytesIO()
             store.archive(identifier, True, stream)
             with ZipFile(stream) as archive:
                 rows = list(map(json.loads, archive.read("frames.jsonl").splitlines()))
                 self.assertEqual([row["frame_index"] for row in rows], [1, 2, 3, 4])
                 self.assertEqual(rows[0]["task"], "Place the cube")
+                self.assertEqual([row["stage"] for row in rows], ["搬运", "搬运", "搬运", None])
+                self.assertEqual(json.loads(archive.read("segments.jsonl"))["label"], "搬运")
                 self.assertEqual(rows[0]["action.normalized"], [0] * 6)
                 packet = gzip.decompress(archive.read(rows[0]["observation.depth"]))
                 header = int.from_bytes(packet[:4], "little")
@@ -95,6 +137,11 @@ class EpisodeTests(unittest.TestCase):
             self.assertEqual(store.detail(identifier)["frames"][1]["task"], "Move the cube")
             restarted = Episodes(arm, Feed(), Feed(), Feed(depth=True), Path(root))
             self.assertEqual(restarted.library()["episodes"][0]["episode_index"], 0)
+            self.assertEqual(restarted.detail(identifier)["segments"][0]["label"], "搬运")
+            restarted.edit_segment({**segment_data, "kind": "exclude", "first": 2, "last": 2})
+            self.assertIsNone(restarted.detail(identifier)["review"])
+            with self.assertRaisesRegex(ValueError, "清洗片段"):
+                restarted.archive(identifier, True, io.BytesIO())
 
 
 if __name__ == "__main__":

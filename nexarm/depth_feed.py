@@ -82,9 +82,13 @@ class DepthFeed:
                 self.color_frames.clear()
                 self.record_frames.clear()
 
-    def sample_at(self, stamp):
+    def samples_between(self, first, last):
         with self.lock:
-            return next((frame for frame in reversed(self.record_frames) if frame[0] <= stamp), None)
+            return [frame for frame in self.record_frames if first <= frame[0] <= last]
+
+    def sample_at(self, stamp):
+        frames = self.samples_between(stamp - .35, stamp)
+        return frames[-1] if frames else None
 
     def color_frame(self, after=0):
         with self.lock:
