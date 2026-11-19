@@ -6,7 +6,7 @@ export const depthPanel = `
       <div class="views"><button type="button" id="depth-freeze" disabled>冻结</button><button type="button" id="depth-fullscreen">放大</button></div></header>
     <div class="depth-image visual-frame" tabindex="0" aria-label="深度画面，移动指针查看距离，点击固定测量像素"><canvas hidden></canvas><p class="camera-message">正在连接 RealSense D405…</p><span class="depth-live-note">光轴深度 Z · 非基座坐标</span><output class="depth-floating-reading"></output><button type="button" class="depth-exit">退出全屏</button></div>
     <div class="depth-readout"><div><span id="depth-pixel">中心像素</span><strong id="depth-value">— mm</strong></div><span id="depth-quality">等待原始深度</span></div>
-    <div class="depth-scale"><label>标尺<select id="depth-range" aria-label="深度显示范围"><option value="50,500">50–500 mm</option><option value="50,1000" selected>50–1000 mm</option><option value="50,3000">50–3000 mm</option></select></label><div class="depth-color-key"><div class="depth-gradient"></div><span><b id="depth-near">50 mm</b><b id="depth-far">1000 mm</b></span></div></div>
+    <div class="depth-scale"><label>显示<select id="depth-mode" aria-label="深度处理模式"><option value="enhanced" selected>增强滤波</option><option value="raw">原始深度</option></select></label><label>标尺<select id="depth-range" aria-label="深度显示范围"><option value="auto" selected>自动近景</option><option value="50,500">50–500 mm</option><option value="50,1000">50–1000 mm</option><option value="50,3000">50–3000 mm</option></select></label><div class="depth-color-key"><div class="depth-gradient"></div><span><b id="depth-near">50 mm</b><b id="depth-far">1000 mm</b></span></div></div>
     <footer class="view-footer depth-footer"><span id="depth-details">黑：无效 · 灰：标尺外</span><div class="camera-tools"><button type="button" id="depth-unpin">跟随指针</button><button type="button" id="depth-download" disabled>16位原图 ↓</button></div></footer>
   </section>`;
 
@@ -16,13 +16,14 @@ export function createDepth(panel) {
   const image = $('.depth-image'), message = $('.camera-message'), badge = $('.depth-state');
   const freeze = $('#depth-freeze'), download = $('#depth-download');
   let frame = null, after = 0, active = true, frozen = false, pinned = false, pixel = null, background = null;
+  let autoRange = null;
   let rateStart = performance.now(), frames = 0, rate = null;
   $('.depth-gradient').style.background = `linear-gradient(to right, ${depthColors.map(color => `rgb(${color.join(',')})`).join(',')})`;
 
   function reading() {
     const value = frame && pixel ? depthMm(frame, ...pixel) : null;
     $('#depth-pixel').textContent = pixel ? `${pinned ? '固定' : '像素'} (${pixel.join(', ')})` : '中心像素';
-    $('#depth-value').textContent = value === null ? '无有效深度' : `${value.toFixed(1)} mm`;
+    $('#depth-value').textContent = value === null ? '原始深度无效' : `${value.toFixed(1)} mm`;
     $('#depth-value').dataset.valid = String(value !== null);
     $('.depth-floating-reading').textContent = `${$('#depth-pixel').textContent} · ${$('#depth-value').textContent}`;
     $('#depth-unpin').disabled = !pinned;
@@ -31,9 +32,11 @@ export function createDepth(panel) {
     if (!frame) return;
     const { width, height } = frame.meta;
     if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
-    const [near, far] = $('#depth-range').value.split(',').map(Number);
+    const [near, far] = $('#depth-range').value === 'auto' ? autoRange || [50, 1000] : $('#depth-range').value.split(',').map(Number);
+    const enhanced = $('#depth-mode').value === 'enhanced' && frame.filtered;
+    $('.depth-live-note').textContent = `${frozen ? `冻结 ${new Date(frame.meta.captured_at_ms).toLocaleTimeString()} · ` : ''}${enhanced ? '保边/时域滤波 · 读数取原始 Z' : '原始深度 · 光轴 Z'}`;
     $('#depth-near').textContent = `${near} mm`; $('#depth-far').textContent = `${far} mm`;
-    if (!background) background = new ImageData(colorizeDepth(frame, near, far), width, height);
+    if (!background) background = new ImageData(colorizeDepth(enhanced ? { ...frame, pixels: frame.filtered } : frame, near, far, { shade: Boolean(enhanced) }), width, height);
     context.putImageData(background, 0, 0);
     if (!pixel || pixel[0] >= width || pixel[1] >= height) pixel = [Math.floor(width / 2), Math.floor(height / 2)];
     const [x, y] = pixel;
@@ -62,11 +65,16 @@ export function createDepth(panel) {
         const next = parseDepthPacket(await response.arrayBuffer());
         if (!active || frozen) return;
         frame = next; background = null; after = frame.meta.stamp;
+        const estimate = frame.meta.suggested_range_mm;
+        if (Array.isArray(estimate) && estimate.length === 2 && estimate.every(Number.isFinite) && estimate[1] > estimate[0]) {
+          autoRange = autoRange ? autoRange.map((value, i) => value * .88 + estimate[i] * .12) : estimate;
+          autoRange = autoRange.map(Math.round);
+        }
         canvas.hidden = false; message.hidden = true; freeze.disabled = false; download.disabled = false;
         const now = performance.now(); frames++;
         if (now - rateStart > 1000) { rate = Math.round(frames * 1000 / (now - rateStart)); frames = 0; rateStart = now; }
         badge.textContent = '实时深度';
-        $('#depth-quality').textContent = `有效像素 ${frame.meta.valid_percent}%`;
+        $('#depth-quality').textContent = `原始有效 ${frame.meta.valid_percent}%`;
         $('#depth-details').textContent = `${frame.meta.width} × ${frame.meta.height}${rate === null ? '' : ` · ${rate} fps`} · 黑：无效 · 灰：标尺外`;
         draw();
       } else if (response.status === 204) {
@@ -88,12 +96,13 @@ export function createDepth(panel) {
   });
   $('#depth-unpin').onclick = () => { pinned = false; reading(); };
   $('#depth-range').onchange = () => { background = null; draw(); };
+  $('#depth-mode').onchange = () => { background = null; draw(); };
   $('#depth-fullscreen').onclick = () => image.requestFullscreen();
   $('.depth-exit').onclick = event => { event.stopPropagation(); document.exitFullscreen(); };
   freeze.onclick = () => {
     frozen = !frozen; freeze.textContent = frozen ? '恢复实时' : '冻结';
     badge.textContent = frozen ? '已冻结' : '等待新帧';
-    $('.depth-live-note').textContent = frozen ? `冻结于 ${new Date(frame.meta.captured_at_ms).toLocaleTimeString()} · 光轴深度 Z` : '光轴深度 Z · 非基座坐标';
+    draw();
     if (!frozen) { rateStart = performance.now(); frames = 0; }
   };
   download.onclick = async () => {

@@ -5,10 +5,38 @@ import unittest
 
 import numpy as np
 
-from nexarm.depth_feed import DepthFeed, depth_packet
+from nexarm.depth_feed import DepthFeed, depth_packet, clean_preview, preview_range
 
 
 class DepthTest(unittest.TestCase):
+    def test_preview_packet_preserves_raw_holes_and_depth_separately(self):
+        raw = np.array([[0, 1234]], dtype=np.uint16)
+        preview = np.array([[1200, 1240]], dtype=np.uint16)
+        info, packet = depth_packet(raw, .0001, {}, preview=preview)
+        length, = struct.unpack_from('<I', packet)
+        self.assertEqual(info['version'], 2)
+        self.assertEqual(struct.unpack('<4H', packet[4 + length:]), (0, 1234, 1200, 1240))
+        self.assertEqual(raw.tolist(), [[0, 1234]])
+
+    def test_isolated_noise_removed_but_surface_and_thin_line_survive(self):
+        pixels = np.zeros((9, 9), dtype=np.uint16)
+        pixels[2:5, 2:5] = 2000
+        pixels[7, 1:6] = 1500
+        pixels[0, 8] = 5000
+        clean = clean_preview(pixels, .0001)
+        self.assertEqual(clean[0, 8], 0)
+        self.assertTrue(np.all(clean[2:5, 2:5] == 2000))
+        self.assertEqual(clean[7, 3], 1500)
+        self.assertEqual(pixels[0, 8], 5000)
+
+    def test_auto_range_ignores_distant_background_and_invalid_pixels(self):
+        pixels = np.full((64, 64), 3000, dtype=np.uint16)
+        pixels[:16] = 35000
+        pixels[-8:] = 0
+        near, far = preview_range(pixels, .0001)
+        self.assertLessEqual(near, 300)
+        self.assertGreaterEqual(far, 300)
+        self.assertLess(far, 1000)
     def test_packet_preserves_native_units_zero_and_metadata(self):
         info, packet = depth_packet(np.array([[0, 1234, 65535]], dtype=np.uint16), .0001, {"stamp": 42})
         length, = struct.unpack_from("<I", packet)

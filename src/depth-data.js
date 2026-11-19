@@ -7,14 +7,20 @@ export function parseDepthPacket(buffer) {
   if (!length || length > 65536 || length + 4 > buffer.byteLength) throw Error('深度元数据无效');
   const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)));
   const { width, height, depth_scale_m: scale } = meta;
-  if (meta.version !== 1 || meta.encoding !== 'z16-le' || !Number.isInteger(width) || !Number.isInteger(height) ||
+  const planes = meta.version === 2 && meta.encoding === 'z16-le-pair' ? 2 : meta.version === 1 && meta.encoding === 'z16-le' ? 1 : 0;
+  if (!planes || !Number.isInteger(width) || !Number.isInteger(height) ||
       width < 1 || height < 1 || width * height > 4_000_000 || !Number.isFinite(scale) || scale <= 0 ||
-      buffer.byteLength !== 4 + length + width * height * 2) throw Error('深度格式或尺寸无效');
+      buffer.byteLength !== 4 + length + width * height * 2 * planes) throw Error('深度格式或尺寸无效');
   // JSON length need not be aligned to a uint16 boundary.
   const data = new DataView(buffer, 4 + length);
   const pixels = new Uint16Array(width * height);
   for (let i = 0; i < pixels.length; i++) pixels[i] = data.getUint16(i * 2, true);
-  return { meta, pixels };
+  let filtered;
+  if (planes === 2) {
+    filtered = new Uint16Array(width * height);
+    for (let i = 0; i < pixels.length; i++) filtered[i] = data.getUint16((pixels.length + i) * 2, true);
+  }
+  return { meta, pixels, filtered };
 }
 
 export function depthMm(frame, x, y) {
@@ -32,7 +38,7 @@ export function imagePixel(clientX, clientY, rect, width, height) {
   return x >= 0 && y >= 0 && x < width && y < height ? [x, y] : null;
 }
 
-export function colorizeDepth(frame, near, far) {
+export function colorizeDepth(frame, near, far, { shade = false } = {}) {
   if (!Number.isFinite(near) || !Number.isFinite(far) || near < 0 || far <= near) throw Error('深度显示范围无效');
   const colors = new Uint8ClampedArray(256 * 4);
   for (let i = 0; i < 256; i++) {
@@ -52,6 +58,20 @@ export function colorizeDepth(frame, near, far) {
     } else {
       const color = Math.round((mm - near) / (far - near) * 255) * 4;
       result[offset] = colors[color]; result[offset + 1] = colors[color + 1]; result[offset + 2] = colors[color + 2];
+    }
+  }
+  if (shade) {
+    const { width, height } = frame.meta;
+    for (let y = 1; y < height - 1; y++) for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x, raw = frame.pixels[i], mm = raw * multiplier;
+      if (!raw || mm < near || mm > far) continue;
+      const left = frame.pixels[i - 1], right = frame.pixels[i + 1], up = frame.pixels[i - width], down = frame.pixels[i + width];
+      if (!left || !right || !up || !down) continue;
+      const dx = Math.max(-20, Math.min(20, (right - left) * multiplier)) * .18;
+      const dy = Math.max(-20, Math.min(20, (down - up) * multiplier)) * .18;
+      const light = (-.4 * dx - .5 * dy + .76) / Math.hypot(dx, dy, 1);
+      const amount = .6 + .4 * Math.max(0, light);
+      for (let c = 0; c < 3; c++) result[i * 4 + c] *= amount;
     }
   }
   return result;
@@ -81,7 +101,7 @@ export async function depthPng(frame) {
   const compressed = new Uint8Array(await new Response(compression).arrayBuffer());
   const header = new Uint8Array(13), h = new DataView(header.buffer);
   h.setUint32(0, width); h.setUint32(4, height); header[8] = 16; // grayscale uint16, lossless
-  const text = new TextEncoder().encode('nexarm\0' + JSON.stringify(frame.meta));
+  const text = new TextEncoder().encode('nexarm\0' + JSON.stringify({ ...frame.meta, export_plane: 'raw', export_storage: 'png16' }));
   return new Blob([new Uint8Array([137,80,78,71,13,10,26,10]), pngChunk('IHDR', header),
     pngChunk('tEXt', text), pngChunk('IDAT', compressed), pngChunk('IEND', new Uint8Array())], { type: 'image/png' });
 }

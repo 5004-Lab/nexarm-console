@@ -89,7 +89,7 @@ body { background: #fff; }
 .capture-grid > section:first-child, #page-capture .chart-grid > :first-child { border-right: 1px solid var(--line); }
 .advanced-layout { padding: 14px 18px; gap: 18px; }
 .servo-card { border: 0; border-bottom: 1px solid var(--line); padding: 10px 8px; }
-.sensor-dock { grid-column: 2; grid-row: 1 / 3; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(2,minmax(0,1fr)) 60px; grid-template-areas: 'rgb depth' 'wrist external' 'tools tools'; min-width: 0; min-height: 0; background: #f8fafc; }
+.sensor-dock { --depth-tools-height: 60px; grid-column: 2; grid-row: 1 / 3; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(2,minmax(0,1fr)) var(--depth-tools-height); grid-template-areas: 'rgb depth' 'wrist external' 'tools tools'; min-width: 0; min-height: 0; background: #f8fafc; }
 .sensor-dock #realsense-camera { grid-area: rgb; }
 .sensor-dock #depth-camera { grid-area: depth; }
 .sensor-dock #wrist-camera { grid-area: wrist; }
@@ -164,7 +164,7 @@ body { background: #fff; }
   #history-summary { width: 100%; margin-left: 0; }
   .observation-fields { grid-template-columns: 1fr; }
   .section-heading { flex-wrap: wrap; }
-  .sensor-dock { grid-column: 1; grid-row: 2; height: calc(100vw * .75 + 216px); }
+  .sensor-dock { --depth-tools-height: 96px; grid-column: 1; grid-row: 2; height: calc(100vw * .75 + 156px + var(--depth-tools-height)); }
   .sensor-dock .camera-panel { grid-template-rows: 41px minmax(0,1fr) 37px; }
   .sensor-dock .camera-panel .camera-image { height: 100%; aspect-ratio: auto; }
   .sensor-dock .panel-header { padding: 4px 5px; }
@@ -173,7 +173,7 @@ body { background: #fff; }
   .sensor-dock .depth-state { display: none; }
   .depth-footer { padding: 2px 4px; gap: 2px; }
   .depth-footer .camera-tools button { padding: 2px; font-size: 9px; }
-  .depth-controls { gap: 2px; }
+  .depth-controls { gap: 0; grid-template-columns: minmax(0,1fr); }
   .depth-controls .depth-readout { gap: 3px; padding: 4px; }
   .depth-controls .depth-readout strong { font-size: 17px; }
   .depth-controls #depth-quality { font-size: 9px; white-space: normal; }
