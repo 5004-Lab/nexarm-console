@@ -225,9 +225,9 @@ const sensorDock = Object.assign(document.createElement('aside'), { className: '
 sensorDock.innerHTML = `${depthPanel}<section class="camera-panel panel" id="realsense-camera" aria-label="RealSense D405 RGB 彩色视频">
   <header class="panel-header"><div class="panel-title"><h2>D405 RGB</h2></div><output class="camera-status status-label">等待画面</output></header>
   <div class="camera-image visual-frame"><canvas hidden aria-label="D405 RGB 实时画面"></canvas><p class="camera-message">正在连接 D405 RGB 相机…</p></div>
-  <footer class="view-footer"><span>D405 彩色视角</span><span class="camera-details" hidden></span></footer></section><div class="depth-controls" aria-label="深度测量与标尺"></div>`;
+  <footer class="view-footer"><span>D405 彩色视角</span><span class="camera-details" hidden></span></footer></section><div class="depth-controls" aria-label="深度显示设置"></div>`;
 sensorDock.append($('#wrist-camera'), $('#external-camera'));
-sensorDock.querySelector('.depth-controls').append(sensorDock.querySelector('.depth-readout'), sensorDock.querySelector('.depth-scale'));
+sensorDock.querySelector('.depth-controls').append(sensorDock.querySelector('.depth-scale'));
 $('.visuals').append(sensorDock);
 const manualInputs = $('.manual-inputs');
 const jointTable = document.createElement('table');
@@ -283,7 +283,17 @@ function showPage() {
   }
   if (activePage === 'capture') capture.refresh();
   window.scrollTo(0, 0);
+  updateControlHeight();
 }
+function updateControlHeight() {
+  const panel = $('#page-control');
+  if (panel.hidden) return;
+  const top = panel.getBoundingClientRect().top + window.scrollY;
+  panel.style.setProperty('--control-available-height', `${Math.max(0, innerHeight - top)}px`);
+}
+const chromeResize = new ResizeObserver(updateControlHeight);
+for (const element of document.querySelectorAll('.app-bar, .page-nav, .history-toolbar')) chromeResize.observe(element);
+window.addEventListener('resize', updateControlHeight);
 window.addEventListener('hashchange', showPage);
 showPage();
 

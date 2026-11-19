@@ -1,3 +1,5 @@
+import { FrameHealth } from './frame-health.js';
+
 const messages = {
   searching: '正在查找机械臂 USB 相机…',
   missing: '未检测到机械臂 USB 相机',
@@ -19,6 +21,8 @@ export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/a
   let deadline = 0;
   let paired = false;
   let lastBlob;
+  let lastSize = '';
+  const health = new FrameHealth();
   const full = panel.querySelector('[data-camera-fullscreen]');
   const download = panel.querySelector('[data-camera-download]');
   if (full) full.onclick = () => panel.querySelector('.camera-image').requestFullscreen();
@@ -38,23 +42,34 @@ export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/a
   function lost(state) {
     paired = false;
     deadline = 0;
-    presented.length = 0;
     const text = state === 'missing' ? `未检测到${name}` : state === 'searching' ? `正在查找${name}…` : messages[state] || messages.unavailable;
-    status(state === 'missing' ? '未连接' : '等待画面', text);
-    canvas.hidden = true;
-    details.hidden = true;
+    const condition = health.check(state, performance.now());
+    if (condition.resetCursor) capture = 0;
+    if (condition.hasFrame) {
+      if (!condition.paused) return;
+      presented.length = 0;
+      status('画面暂停');
+      badge.title = `${text}；当前保留上一帧，正在自动重连`;
+      panel.dataset.stale = 'true';
+      panel.querySelector('.camera-image').dataset.paused = 'true';
+      details.textContent = `${lastSize} · 已暂停`;
+    } else {
+      status(state === 'missing' ? '未连接' : '等待画面', text);
+      details.hidden = true;
+    }
   }
 
   async function poll() {
     const started = performance.now();
     let delay = 0;
     try {
-      const response = await fetch(`${endpoint}?after=${capture}`, { cache: 'no-store', signal: AbortSignal.timeout(1500) });
+      if (document.hidden || panel.closest('.work-page')?.hidden) { delay = 500; return; }
+      const response = await fetch(`${endpoint}?after=${capture}`, { cache: 'no-store', signal: AbortSignal.timeout(4000) });
       if (!active) return;
       const mode = response.headers.get('X-Camera-State');
       if (response.status === 200) {
-        lastBlob = await response.blob();
-        const bitmap = await createImageBitmap(lastBlob);
+        const blob = await response.blob();
+        const bitmap = await createImageBitmap(blob);
         try {
           if (!active) return;
           const pose = JSON.parse(response.headers.get('X-Camera-Pose') || 'null');
@@ -65,12 +80,17 @@ export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/a
             canvas.height = bitmap.height;
           }
           context.drawImage(bitmap, 0, 0);
+          lastBlob = blob;
           canvas.hidden = false;
           paired = syncPose && Array.isArray(pose) && pose.length === 6;
           const now = performance.now();
+          health.received(now);
+          panel.dataset.stale = 'false';
+          panel.querySelector('.camera-image').dataset.paused = 'false';
           presented.push(now);
           while (presented[0] < now - 1000) presented.shift();
           const size = `${bitmap.width} × ${bitmap.height}`;
+          lastSize = size;
           const elapsed = now - presented[0];
           const rate = elapsed >= 500 ? Math.round((presented.length - 1) * 1000 / elapsed) : null;
           details.textContent = rate === null ? size : `${size} · ${rate} fps`;
@@ -79,15 +99,16 @@ export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/a
           if (paired) onPose(pose);
           onFrame({ stamp: capture, skew: paired ? Number(skew) : null, width: bitmap.width, height: bitmap.height, rate });
           status(paired ? `同步 · ${skew} ms` : syncPose ? '实时画面 · 等待关节反馈' : '实时画面');
+          badge.title = '';
         } finally {
           bitmap.close();
         }
-      } else if (!['live', 'waiting'].includes(mode) || performance.now() > deadline) {
+      } else {
         lost(mode);
         if (mode !== 'live' && mode !== 'waiting') delay = 650;
       }
     } catch {
-      if (performance.now() > deadline) lost('unavailable');
+      lost('unavailable');
       delay = 300;
     } finally {
       if (active) setTimeout(poll, document.hidden ? 500 : Math.max(delay, 1000 / 15 - (performance.now() - started)));

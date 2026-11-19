@@ -86,7 +86,7 @@ function lineDomain(figure, samples) {
   return [Math.floor(low / step) * step, Math.ceil(high / step) * step, step];
 }
 
-function timeOption(figure, samples) {
+function timeOption(figure, samples, compact = false) {
   const source = samples;
   samples = plotSamples(source, figure.names.length);
   const tail = samples.at(-1)?.stamp ?? 0;
@@ -95,15 +95,15 @@ function timeOption(figure, samples) {
   const [min, max, interval] = lineDomain(figure, samples);
   const hasData = samples.some(sample => sample.values?.some(Number.isFinite));
   return {
-    ...base, grid: { ...grid, bottom: 76 },
-    dataZoom: [{ id: 'time-zoom', type: 'slider', bottom: 4, height: 19, filterMode: 'none' }, { id: 'time-inside', type: 'inside', filterMode: 'none' }],
-    legend: { show: true, top: 9, right: 20, icon: 'roundRect', itemWidth: 14, itemHeight: 3,
-      padding: [6, 8], borderColor: '#ccd1d6', borderWidth: 1, backgroundColor: '#fff', textStyle },
+    ...base, grid: { ...grid, left: compact ? 56 : grid.left, right: compact ? 14 : grid.right, top: compact ? 30 : grid.top, bottom: compact ? 53 : 76 },
+    dataZoom: [{ id: 'time-zoom', type: 'slider', bottom: 3, height: compact ? 12 : 19, filterMode: 'none' }, { id: 'time-inside', type: 'inside', filterMode: 'none' }],
+    legend: { show: true, top: compact ? 3 : 9, right: compact ? 12 : 20, icon: 'roundRect', itemWidth: 14, itemHeight: 3,
+      padding: compact ? [3, 5] : [6, 8], borderColor: '#ccd1d6', borderWidth: 1, backgroundColor: '#fff', textStyle },
     xAxis: { ...axis, type: 'value', min: displaySeconds ? Math.max(0, elapsed - displaySeconds) : 0, max: elapsed, splitNumber: 6,
       axisLabel: { ...axis.axisLabel, formatter: rounded },
-      name: '记录开始后的时间 (s)', nameLocation: 'middle', nameGap: 29 },
+      name: '记录开始后的时间 (s)', nameLocation: 'middle', nameGap: compact ? 24 : 29 },
     yAxis: { ...axis, type: 'value', min, max, interval, axisLabel: { ...axis.axisLabel, formatter: rounded },
-      name: figure.axis, nameLocation: 'middle', nameGap: 43 },
+      name: figure.axis, nameLocation: 'middle', nameGap: compact ? 36 : 43 },
     graphic: { id: 'empty', type: 'text', silent: true, left: 'center', top: 'middle',
       invisible: hasData, style: { text: '等待实测数据', fill: '#5c6771', fontSize: 13, fontFamily } },
     tooltip: { ...tip, trigger: 'axis', axisPointer: { type: 'line', snap: true, lineStyle: { color: '#59646e', type: 'dashed' } },
@@ -237,7 +237,7 @@ export function createTelemetry() {
     const key = panel.dataset.figure;
     const option = key === 'range' ? () => rangeOption(angles)
       : key === 'workspace' ? host => reachOption(host, tcp)
-      : () => timeOption(figures[key], history[key]);
+      : () => timeOption(figures[key], history[key], Boolean(panel.closest('#page-control')));
     const version = key === 'range' ? () => angles?.join(',')
       : key === 'workspace' ? () => tcp?.slice(0, 2).join(',')
       : () => `${history[key].at(-1)?.stamp}:${historyVersion}:${displaySeconds}`;
