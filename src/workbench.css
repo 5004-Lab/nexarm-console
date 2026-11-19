@@ -109,6 +109,8 @@ body { background: #fff; }
 .depth-image:fullscreen { width: 100vw; height: 100vh; }
 .depth-floating-reading { display: none; position: absolute; top: 12px; right: 12px; padding: 8px 12px; background: #111b26d9; color: #fff; font: 18px ui-monospace, monospace; pointer-events: none; }
 .depth-image:fullscreen .depth-floating-reading { display: block; }
+.depth-exit { display: none; position: absolute; top: 12px; left: 12px; min-height: 32px; background: #111b26d9; border-color: #7891a5; color: #fff; }
+.depth-image:fullscreen .depth-exit { display: block; }
 .depth-readout { display: flex; justify-content: space-between; align-items: center; gap: 7px; padding: 4px 8px; border-top: 1px solid var(--line); font-size: 11px; }
 .depth-readout > div { display: grid; gap: 1px; }
 .depth-readout strong { color: #154f75; font: 650 20px/1.2 ui-monospace, monospace; font-variant-numeric: tabular-nums; }

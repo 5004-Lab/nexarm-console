@@ -1,4 +1,3 @@
-import gzip
 import json
 import struct
 import time
@@ -36,4 +35,3 @@ class DepthTest(unittest.TestCase):
         self.assertEqual(feed.frame(stamp), ("live", None))
         feed.update_state("missing")
         self.assertEqual(feed.frame(), ("missing", None))
-

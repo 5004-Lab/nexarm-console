@@ -4,7 +4,7 @@ export const depthPanel = `
   <section class="depth-panel panel" id="depth-camera" aria-label="RealSense D405 深度视图">
     <header class="panel-header"><div class="panel-title"><h2>D405 深度</h2><span class="depth-state status-label">连接中</span></div>
       <div class="views"><button type="button" id="depth-freeze" disabled>冻结</button><button type="button" id="depth-fullscreen">放大</button></div></header>
-    <div class="depth-image visual-frame" tabindex="0" aria-label="深度画面，移动指针查看距离，点击固定测量像素"><canvas hidden></canvas><p class="camera-message">正在连接 RealSense D405…</p><span class="depth-live-note">光轴深度 Z · 非基座坐标</span><output class="depth-floating-reading"></output></div>
+    <div class="depth-image visual-frame" tabindex="0" aria-label="深度画面，移动指针查看距离，点击固定测量像素"><canvas hidden></canvas><p class="camera-message">正在连接 RealSense D405…</p><span class="depth-live-note">光轴深度 Z · 非基座坐标</span><output class="depth-floating-reading"></output><button type="button" class="depth-exit">退出全屏</button></div>
     <div class="depth-readout"><div><span id="depth-pixel">中心像素</span><strong id="depth-value">— mm</strong></div><span id="depth-quality">等待原始深度</span></div>
     <div class="depth-scale"><label>标尺<select id="depth-range" aria-label="深度显示范围"><option value="50,500">50–500 mm</option><option value="50,1000" selected>50–1000 mm</option><option value="50,3000">50–3000 mm</option></select></label><div class="depth-color-key"><div class="depth-gradient"></div><span><b id="depth-near">50 mm</b><b id="depth-far">1000 mm</b></span></div></div>
     <footer class="view-footer depth-footer"><span id="depth-details">黑：无效 · 灰：标尺外</span><div class="camera-tools"><button type="button" id="depth-unpin">跟随指针</button><button type="button" id="depth-download" disabled>16位原图 ↓</button></div></footer>
@@ -89,6 +89,7 @@ export function createDepth(panel) {
   $('#depth-unpin').onclick = () => { pinned = false; reading(); };
   $('#depth-range').onchange = () => { background = null; draw(); };
   $('#depth-fullscreen').onclick = () => image.requestFullscreen();
+  $('.depth-exit').onclick = event => { event.stopPropagation(); document.exitFullscreen(); };
   freeze.onclick = () => {
     frozen = !frozen; freeze.textContent = frozen ? '恢复实时' : '冻结';
     badge.textContent = frozen ? '已冻结' : '等待新帧';
