@@ -4,6 +4,32 @@ NexArm 六舵机机械臂的浏览器工作台，集成数字孪生、XYZ 与关
 
 详细使用说明见 [WORKBENCH.md](WORKBENCH.md)，Linux 部署及 D405 配置见 [DEPLOYMENT.md](DEPLOYMENT.md)，独立抓取实验见 [Grasp Lab](experiments/grasp-lab/README.md)。
 
+## 界面预览
+
+### 四路 Episode 回放
+
+以「把黄色螺丝刀放入绿色罐子」的示教为例，同一行可查看 D405 RGB、原始深度的可视化、腕部 RGB 和第三人称 RGB。拖动时间轴可逐帧查看夹取和放置过程。
+
+[![四路 Episode 回放与时间轴](docs/screenshots/episode-replay.png)](docs/screenshots/episode-replay.png)
+
+### 片段标注、裁剪与同步轨迹
+
+在时间带上设起止帧，保存任务阶段或裁剪保留范围。下方的六轴与夹爪轨迹共用 Episode 时间轴，右侧时间戳表显示各路观测与采样点的偏移，便于检查同步质量。
+
+[![Episode 阶段标注、裁剪、关节曲线与逐帧时间戳](docs/screenshots/episode-annotation-and-telemetry.png)](docs/screenshots/episode-annotation-and-telemetry.png)
+
+### 数字孪生与末端轨迹
+
+数字孪生按关节反馈更新姿态。紫色线条显示已记录的末端路径，右上角可切换三维、正视和俯视视角。
+
+[![数字孪生显示机械臂实测姿态和末端轨迹](docs/screenshots/digital-twin.png)](docs/screenshots/digital-twin.png)
+
+### 控制页实时监看
+
+控制页以 2×2 布局同时显示三路 RGB 和 D405 深度。深度预览支持调整显示标尺、冻结和放大，也可单独下载原始 16 位图。
+
+[![控制页实时显示 D405 RGB、深度、腕部和第三人称四路相机](docs/screenshots/four-camera-monitor.png)](docs/screenshots/four-camera-monitor.png)
+
 ## 环境要求
 
 - 四路示教使用 Linux、FFmpeg、V4L2、两台 USB RGB 相机和一台 RealSense D405。D405 通过 `requirements-depth.txt` 安装可选依赖，启动时加 `--depth-camera`。设备选择和 SDK 平台要求见 [Linux 部署](DEPLOYMENT.md#optional-realsense-d405-depth)。
