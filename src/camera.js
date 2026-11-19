@@ -46,7 +46,8 @@ export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/a
   }
 
   async function poll() {
-    let delay = endpoint.endsWith('external') ? 140 : 70;
+    const started = performance.now();
+    let delay = 0;
     try {
       const response = await fetch(`${endpoint}?after=${capture}`, { cache: 'no-store', signal: AbortSignal.timeout(1500) });
       if (!active) return;
@@ -89,7 +90,7 @@ export function createCamera(panel, onPose, onFrame = () => {}, { endpoint = '/a
       if (performance.now() > deadline) lost('unavailable');
       delay = 300;
     } finally {
-      if (active) setTimeout(poll, document.hidden ? 500 : delay);
+      if (active) setTimeout(poll, document.hidden ? 500 : Math.max(delay, 1000 / 15 - (performance.now() - started)));
     }
   }
   function start() {

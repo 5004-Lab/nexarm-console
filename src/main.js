@@ -611,12 +611,14 @@ function render() {
   const maintenance = enabled && !state.remote_control;
   const editing = !state.task;
   $('#link').classList.toggle('online-link', Boolean(state.connected));
-  $('#link span').textContent = state.connected ? 'USB 已连接' : '等待 USB';
+  $('#link span').textContent = state.connected ? 'USB 已连接' : transportLost ? '服务未连接' : state.port ? '等待控制板回复' : '等待 USB';
+  $('#link').title = transportLost ? '无法连接服务器，请检查网络和控制台地址' : state.message || '';
   $('#voltage').textContent = state.voltage == null ? '— V' : `${state.voltage.toFixed(2)} V`;
   $('#voltage').title = state.bridge ? '切换运动通道前的实测电压' : '主控实测电压';
   $('#firmware').textContent = state.firmware ? `ESP32 ${state.firmware.esp}` : '—';
   $('#arm span').textContent = state.remote_view ? '仅查看' : state.armed ? '锁定控制' : state.operator_busy ? '控制被占用' : '启用控制';
   $('#arm').disabled = state.remote_view || busy || (!state.armed && (!state.connected || !state.power_ok || state.operator_busy));
+  $('#arm').title = state.remote_view ? '当前页面仅可查看' : transportLost ? '服务器连接尚未恢复' : state.armed ? '锁定当前控制会话' : state.operator_busy ? '另一个页面已启用控制' : !state.connected ? state.message || '等待机械臂 USB 通信' : !state.power_ok ? '等待有效的供电电压反馈' : '启用当前页面的控制会话';
   $('#arm').classList.toggle('engaged', Boolean(state.armed));
   $('#twin-status').textContent = modelError ? '模型加载失败' : !modelReady ? '加载模型' : state.connected ? '实测姿态' : initialized ? '反馈已暂停' : '等待反馈';
   $('#rate').textContent = state.connected ? `${state.hz} Hz · ${state.port?.split('/').pop()?.replace(/^usb-/, '')}` : '等待六轴反馈';

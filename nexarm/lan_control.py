@@ -33,6 +33,7 @@ def application(host, port, peer, upstream_port, password):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        disable_nagle_algorithm = True
 
         def reply(self, code, value, **headers):
             body = json.dumps(value, ensure_ascii=False).encode()

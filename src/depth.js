@@ -69,7 +69,8 @@ export function createDepth(panel) {
     $('.depth-floating-reading').textContent = '';
   }
   async function poll() {
-    let delay = 75;
+    const started = performance.now();
+    let delay = 0;
     try {
       if (frozen || document.hidden || panel.closest('.work-page')?.hidden) return;
       const response = await fetch(`/api/depth?after=${after}`, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
@@ -95,7 +96,7 @@ export function createDepth(panel) {
         if (status !== 'live') { lost(status); delay = 700; }
       } else { lost(response.status === 404 ? 'disabled' : 'unavailable'); delay = 1000; }
     } catch { if (!frozen) lost('unavailable'); delay = 700; }
-    finally { if (active) setTimeout(poll, frozen || document.hidden ? 500 : delay); }
+    finally { if (active) setTimeout(poll, frozen || document.hidden ? 500 : Math.max(delay, 1000 / 15 - (performance.now() - started))); }
   }
   image.addEventListener('pointermove', event => {
     if (!frame || pinned) return;

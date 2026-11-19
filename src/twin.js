@@ -9,6 +9,8 @@ import sampledReach from './reach.json';
 import { toScene, fromScene } from './target-space.js';
 
 export function createTwin(host, onLoad) {
+  let dirty = true;
+  const invalidate = () => { dirty = true; };
   let renderer;
   try {
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -18,7 +20,7 @@ export function createTwin(host, onLoad) {
   }
   renderer.setPixelRatio(Math.min(devicePixelRatio, 1.8));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.2;
   renderer.domElement.setAttribute('aria-label', 'NexArm 三维数字孪生');
@@ -28,6 +30,7 @@ export function createTwin(host, onLoad) {
   scene.background = new THREE.Color(0xf7faff);
   const camera = new THREE.PerspectiveCamera(34, 1, 0.012, 12);
   const controls = new OrbitControls(camera, renderer.domElement);
+  controls.addEventListener('change', invalidate);
   controls.enableDamping = true;
   controls.minDistance = 0.34;
   controls.maxDistance = 2.5;
@@ -108,6 +111,7 @@ export function createTwin(host, onLoad) {
   targetDot.rotation.x = -Math.PI / 2;
   scene.add(targetDot);
   const transform = new TransformControls(camera, renderer.domElement);
+  transform.addEventListener('change', invalidate);
   transform.setMode('translate');
   transform.setSpace('local');
   transform.setSize(0.75);
@@ -145,6 +149,7 @@ export function createTwin(host, onLoad) {
   const picker = new THREE.Raycaster();
   let pickCallback;
   function updateSelection() {
+    invalidate();
     if (!pickCallback) return;
     const xyz = fromScene(targetDot.position.toArray());
     pickHeight = xyz[2];
@@ -195,6 +200,7 @@ export function createTwin(host, onLoad) {
   let error = false;
   const manager = new THREE.LoadingManager();
   manager.onLoad = () => {
+    invalidate();
     if (!error) onLoad('');
   };
   manager.onError = () => {
@@ -250,6 +256,7 @@ export function createTwin(host, onLoad) {
     for (const joint of Object.values(robot.joints)) joint.ignoreLimits = true;
     robot.links.gripper_link.add(flange);
     scene.add(robot);
+    invalidate();
     applyReadings();
   }, undefined, () => onLoad('无法加载 NexArm 三维模型'));
 
@@ -257,12 +264,16 @@ export function createTwin(host, onLoad) {
     const { clientWidth: width, clientHeight: height } = host;
     if (!width || !height) return;
     renderer.setSize(width, height, false);
+    invalidate();
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
   });
   resize.observe(host);
   renderer.setAnimationLoop(() => {
+    if (document.hidden || !host.getClientRects().length) return;
     controls.update();
+    if (!dirty) return;
+    dirty = false;
     if (pickCallback) {
       const projected = targetDot.position.clone().project(camera);
       targetLabel.style.left = `${Math.max(5, Math.min(host.clientWidth - targetLabel.offsetWidth - 5, (projected.x + 1) * host.clientWidth / 2 + 14))}px`;
@@ -272,11 +283,13 @@ export function createTwin(host, onLoad) {
   });
   return {
     update(value) {
+      const changed = !readings || value.some((joint, i) => joint[0] !== readings[i][0]);
       readings = value;
-      applyReadings();
+      if (changed) { applyReadings(); invalidate(); }
     },
     view,
     pick(height, callback, initialPoint) {
+      invalidate();
       const enabled = height !== null;
       pickCallback = enabled ? callback : null;
       controls.enableRotate = true;
@@ -298,6 +311,7 @@ export function createTwin(host, onLoad) {
       return sliceSamples.length;
     },
     target(point) {
+      invalidate();
       targetDot.visible = point !== null || Boolean(pickCallback);
       if (point) {
         targetDot.position.copy(coordinates(point));
@@ -306,11 +320,13 @@ export function createTwin(host, onLoad) {
     },
     targetSnap(step) { transform.setTranslationSnap(step / 1000); },
     setPath(points) {
+      invalidate();
       trajectory.geometry.dispose();
       trajectory.geometry = new THREE.BufferGeometry().setFromPoints(points.map(coordinates));
       trajectory.visible = points.length > 1;
     },
     setTrace(points) {
+      invalidate();
       trace.geometry.dispose();
       trace.geometry = new THREE.BufferGeometry().setFromPoints(points.map(coordinates));
       trace.visible = points.length > 1;

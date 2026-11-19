@@ -836,6 +836,7 @@ def application(controller, origin, camera, view_password=None, recorder=None, e
 
     class Handler(SimpleHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        disable_nagle_algorithm = True
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(ROOT / "dist"), **kwargs)
