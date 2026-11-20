@@ -109,7 +109,7 @@ lerobot-train --dataset.repo_id=nexarm/teaching --dataset.root=datasets/nexarm-t
 | --- | --- | --- |
 | `127.0.0.1` | `8765` | 主控电脑，含板载维护 |
 | 主控电脑局域网 IPv4 | `8765` | 登录后查看相机和实测反馈 |
-| 主控电脑局域网 IPv4 | `8766` | 授权电脑可控制 XYZ、关节和在线动作组 |
+| 主控电脑局域网 IPv4 | `8766` | 登录后可控制 XYZ、关节和在线动作组 |
 
 **开启局域网查看**。在设置了 `NEXARM_LAN_PASSWORD` 的终端启动主服务：
 
@@ -120,10 +120,10 @@ lerobot-train --dataset.repo_id=nexarm/teaching --dataset.root=datasets/nexarm-t
 **开启局域网控制**。保持主服务运行，在另一个设置了 `NEXARM_CONTROL_PASSWORD` 的终端启动网关：
 
 ```sh
-.venv/bin/python -m nexarm.lan_control --host 192.168.1.10 --peer 192.168.1.20
+.venv/bin/python -m nexarm.lan_control --host 192.168.1.10 --allow-any-peer
 ```
 
-从 `--peer` 指定的电脑访问 `http://192.168.1.10:8766/`，登录后点击「启用控制」。网关与本机控制台共享同一控制会话，同一时间只允许一个操作者。若主服务使用了自定义端口，为网关加 `--upstream-port` 指定主服务端口。
+能连到该局域网地址的电脑均可访问 `http://192.168.1.10:8766/`。使用账号 `nexarm` 和 `NEXARM_CONTROL_PASSWORD` 配置的密码登录，再点击「启用控制」。网关与本机控制台共享同一控制会话，同一时间只允许一个操作者。若要仅允许指定电脑登录，可将 `--allow-any-peer` 换成 `--peer 192.168.1.20`。若主服务使用了自定义端口，为网关加 `--upstream-port` 指定主服务端口。
 
 ## 工位与模型
 
@@ -175,7 +175,7 @@ camera/build.sh  # macOS，需要相机时运行
 - **USB 未连接**。确认串口设备名，关闭占用该串口的厂商软件，再检查服务是否收到六轴反馈。
 - **重启后识别到 CH340 但没有串口**。缺少原生驱动的 Linux 主机可安装开机绑定服务。[CH340 恢复步骤](DEPLOYMENT.md#ch340-disappears-after-reboot)
 - **相机无画面**。确认腕部相机已接入、编译了采集助手、macOS 已授予相机权限，并用 `--camera-device` 指定设备名称。
-- **远端显示「仅查看」**。查看使用 `8765`。确认控制网关已启动，从授权电脑使用 `8766` 并点击「启用控制」。
+- **远端显示「仅查看」**。查看使用 `8765`。确认控制网关已启动，使用 `8766` 登录并点击「启用控制」。
 
 ## 提交说明
 

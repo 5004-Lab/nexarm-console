@@ -50,7 +50,11 @@ def application(host, port, peer, upstream_port, password):
                 self.wfile.write(body)
 
         def authorized(self):
-            if self.client_address[0] not in (host, peer) or self.headers.get("Host") != authority:
+            if self.headers.get("Host") != authority:
+                self.close_connection = True
+                self.reply(403, {"error": "请使用控制台地址访问"})
+                return False
+            if peer is not None and self.client_address[0] not in (host, peer):
                 self.close_connection = True
                 self.reply(403, {"error": "此控制端口只允许授权电脑访问"})
                 return False
@@ -146,16 +150,22 @@ def application(host, port, peer, upstream_port, password):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", required=True, type=ipaddress.IPv4Address)
-    parser.add_argument("--peer", required=True, type=ipaddress.IPv4Address)
+    access = parser.add_mutually_exclusive_group(required=True)
+    access.add_argument("--peer", type=ipaddress.IPv4Address, help="allow this client IPv4 address")
+    access.add_argument("--allow-any-peer", action="store_true", help="allow any reachable client to log in")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--upstream-port", type=int, default=8765)
     args = parser.parse_args()
     password = os.environ.get("NEXARM_CONTROL_PASSWORD", "")
-    if (len(password) < 12 or args.host.is_unspecified or args.peer.is_unspecified):
-        parser.error("a specific host and peer, and a control password of at least 12 characters, are required")
-    host, peer = str(args.host), str(args.peer)
+    if args.host.is_unspecified or (args.peer is not None and args.peer.is_unspecified):
+        parser.error("--host and --peer must specify concrete IPv4 addresses")
+    if len(password) < 12:
+        parser.error("NEXARM_CONTROL_PASSWORD must contain at least 12 characters")
+    host = str(args.host)
+    peer = str(args.peer) if args.peer is not None else None
     with GatewayServer((host, args.port), application(host, args.port, peer, args.upstream_port, password)) as server:
-        print(f"NexArm control: http://{host}:{args.port}/ (peer {peer})", flush=True)
+        client_access = "any reachable client" if peer is None else f"peer {peer}"
+        print(f"NexArm control: http://{host}:{args.port}/ ({client_access})", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
