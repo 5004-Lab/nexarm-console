@@ -6,6 +6,19 @@ Linux cameras use FFmpeg and V4L2. Choose stable /dev/v4l/by-id device paths. Us
 
 CH340 adapters bound to the generic USB serial driver can use the project compatibility initializer. Install deploy/70-nexarm-ch340.rules in /etc/udev/rules.d and reload udev rules to allow dialout users to initialize the adapter. Prefer a native ch341 kernel driver when available.
 
+### CH340 disappears after reboot
+
+If `lsusb` shows `1a86:7523` but there is no `/dev/ttyUSB*`, first check that the kernel has the native `ch341` driver. On hosts that lack it and have `/sys/bus/usb-serial/drivers/generic/new_id`, install the optional system service to register the device ID at every boot:
+
+```sh
+sudo install -m 0644 deploy/nexarm-ch340-generic.service.example /etc/systemd/system/nexarm-ch340-generic.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now nexarm-ch340-generic.service
+ls -l /dev/serial/by-id/
+```
+
+The service skips registration when the native driver is registered. The NexArm service detects the serial port when it appears. Check that joint feedback and supply voltage are both visible before enabling control.
+
 Use password-protected LAN viewing and the authorized control gateway as described in README.md. Keep service-specific addresses and credentials in local configuration, outside Git. Sample Linux service templates will be provided separately. Never commit .env files or capture data.
 
 Run .venv/bin/python -m unittest discover -s tests -v before deployment. Build with npm run build, then restart the managed services during an idle period. Do not interrupt an active operator.

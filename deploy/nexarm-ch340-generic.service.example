@@ -1,0 +1,13 @@
+[Unit]
+Description=Register CH340 with the generic USB serial driver for NexArm
+After=systemd-modules-load.service
+ConditionPathExists=/sys/bus/usb-serial/drivers/generic/new_id
+ConditionPathIsDirectory=!/sys/bus/usb/drivers/ch341
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -ec "grep -qx '1a86 7523' /sys/bus/usb-serial/drivers/generic/new_id || echo '1a86 7523' > /sys/bus/usb-serial/drivers/generic/new_id"
+
+[Install]
+WantedBy=multi-user.target

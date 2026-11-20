@@ -173,6 +173,7 @@ camera/build.sh  # macOS，需要相机时运行
 运行 `.venv/bin/python -m unittest discover -s tests -v` 可复测截图中的目标和舵机滞后保护，无需连接硬件。
 
 - **USB 未连接**。确认串口设备名，关闭占用该串口的厂商软件，再检查服务是否收到六轴反馈。
+- **重启后识别到 CH340 但没有串口**。缺少原生驱动的 Linux 主机可安装开机绑定服务。[CH340 恢复步骤](DEPLOYMENT.md#ch340-disappears-after-reboot)
 - **相机无画面**。确认腕部相机已接入、编译了采集助手、macOS 已授予相机权限，并用 `--camera-device` 指定设备名称。
 - **远端显示「仅查看」**。查看使用 `8765`。确认控制网关已启动，从授权电脑使用 `8766` 并点击「启用控制」。
 
